@@ -2,18 +2,28 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("org.jetbrains.kotlin.plugin.serialization")
 }
 
 android {
     namespace = "com.veritransit.inspector"
     compileSdk = 36
+    // Matches the NDK the GenieX prebuilt .so files were linked against.
+    ndkVersion = "27.3.13750724"
 
     defaultConfig {
         applicationId = "com.veritransit.inspector"
-        minSdk = 26
+        // GenieX (QAIRT/HTP) requires API 31+.
+        minSdk = 31
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        ndk {
+            // Snapdragon only — the GenieX AAR ships ~80 MB of arm64 QNN libs and
+            // nothing else; packaging other ABIs just bloats the APK.
+            abiFilters += "arm64-v8a"
+        }
     }
 
     signingConfigs {
@@ -32,6 +42,12 @@ android {
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.getByName("release")
         }
+    }
+
+    packaging {
+        // QNN backends are dlopen'd by name from the app's native lib dir, so they
+        // have to be real files on disk rather than entries inside the APK.
+        jniLibs.useLegacyPackaging = true
     }
 
     compileOptions {
@@ -63,4 +79,24 @@ dependencies {
     implementation("androidx.compose.material3:material3:1.4.0")
     implementation("androidx.compose.material:material-icons-extended:1.7.8")
     implementation("androidx.core:core-ktx:1.17.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.4")
+
+    // On-device inference: Qwen3-VL-4B-Instruct (w4a16) on the Snapdragon NPU.
+    // 0.4.0 is the floor: earlier builds resolve AI Hub models through a
+    // per-model info.json pinned to an older release, which 404s for
+    // Qwen3-VL-4B-Instruct. 0.4.0 reads the current global release manifest.
+    implementation("com.qualcomm.qti:geniex-android:0.4.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+
+    // Camera capture feeding the vision tower.
+    implementation("androidx.camera:camera-core:1.4.2")
+    implementation("androidx.camera:camera-camera2:1.4.2")
+    implementation("androidx.camera:camera-lifecycle:1.4.2")
+    implementation("androidx.camera:camera-view:1.4.2")
+
+    // Instrumented checks for the NPU path — they need a real Hexagon, so they
+    // only run on a device with the bundle already pulled.
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:core:1.6.1")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }

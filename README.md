@@ -21,6 +21,64 @@ machine-verified values.
 | Records | Searchable/filterable audit vault with flagged-consignment audit card |
 | Settings | Inspector profile, sound & haptic feedback, app info |
 
+## On-device AI (Snapdragon NPU)
+
+Vision and language run locally on the Hexagon NPU via the **Qualcomm GenieX
+SDK** (`com.qualcomm.qti:geniex-android`), using the pre-compiled
+**Qwen3-VL-4B-Instruct** bundle Qualcomm publishes on AI Hub.
+
+| | |
+| --- | --- |
+| Model | `qualcomm/Qwen3-VL-4B-Instruct`, `w4a16` |
+| Runtime | GenieX → QAIRT (`qairt` plugin), compute unit `npu` |
+| Chipset bundle | `qualcomm-snapdragon-8-elite-gen5` (SM8850) |
+| Context | 2048 tokens (compiled into the bundle; not adjustable at runtime) |
+| Download | ~4.4 GB, once, into the app's private files dir |
+
+Weights are **not** in the APK. On first use, `NpuEngine` asks the SDK's model
+manager which chipset this handset is, finds the model in the AI Hub catalog,
+and pulls the matching bundle. Everything after that runs with the radio off.
+
+Three tasks use it (`InspectorAi`):
+
+| Step | Task |
+| --- | --- |
+| Load E-Way Bill | Reads the printed bill from a photo into a structured manifest |
+| Cargo Scan | Counts visible cargo against the declared manifest |
+| Verification Result | Drafts the officer's statutory remarks (text-only) |
+
+Every screen degrades to the scripted demo path when the model is absent, so
+the app is fully usable without the download. Manage it under
+**Settings → On-device AI**.
+
+### Running the on-device tests
+
+```bash
+./gradlew :app:assembleDebug :app:assembleDebugAndroidTest
+adb install -r -t app/build/outputs/apk/debug/app-debug.apk
+adb install -r -t app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+adb shell am instrument -w -e class com.veritransit.inspector.ai.NpuInferenceTest \
+  com.veritransit.inspector.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+> [!WARNING]
+> Do **not** use `./gradlew :app:connectedDebugAndroidTest`. It uninstalls the
+> APK when the run finishes, which deletes the app's data dir — and with it the
+> 4.4 GB model bundle, forcing a full re-download. `am instrument` leaves the
+> install alone.
+
+The suite skips itself (rather than failing) when the model is not resident, so
+it is safe to run on a machine without a Snapdragon device attached.
+
+### Known constraint
+
+Creating the four weight-shared HTP context binaries asks the cDSP for a large
+block up front. When another client on the phone is already holding cDSP
+memory, the third context comes back `QNN_COMMON_ERROR_RESOURCE_UNAVAILABLE`
+(1007) and the load fails. `NpuEngine.load()` retries with backoff; if it still
+fails, restarting the app (which drops the previous process's DSP session)
+clears it.
+
 ## Telegram container-check bot
 
 [telegram-bot/](telegram-bot/) is a companion JVM service that shares the
@@ -38,7 +96,8 @@ never committed).
 
 ## Highlights
 
-- **Fully offline demo** — in-memory data, zero permissions, no network access.
+- **Offline after setup** — in-memory records; the network is used once, to pull
+  the model bundle.
 - **Motion-first UX** — staggered list entrances, animated counters, scanning line,
   spring checkbox/radio states, verdict stamp overlay, animated tab & screen transitions.
 - **Lightweight** — R8-minified release APK ≈ 1.4 MB; every visual (evidence canvases,
@@ -57,13 +116,15 @@ Output: `app/build/outputs/apk/release/app-release.apk`
 `app/build.gradle.kts`).
 
 Requirements: JDK 17+, Android SDK 36 (`sdk.dir` via `local.properties` or
-`ANDROID_HOME`).
+`ANDROID_HOME`), NDK 27.3.13750724. `minSdk` is 31 and the only packaged ABI is
+`arm64-v8a` — both are GenieX requirements.
 
 ## Project layout
 
 ```
 app/src/main/java/com/veritransit/inspector/
 ├── MainActivity.kt
+├── ai/              # GenieX engine, inspection prompts, camera + image prep
 ├── data/            # models, seed repository, consignment presets
 └── ui/
     ├── theme/       # color tokens, typography (variable fonts), theme
