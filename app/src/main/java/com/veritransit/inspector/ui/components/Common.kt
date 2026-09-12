@@ -365,7 +365,7 @@ data class Bounds(val x: Float, val y: Float, val w: Float, val h: Float, val co
  * Drawn entirely in code — zero image assets shipped.
  */
 @Composable
-fun EvidenceCanvas(modifier: Modifier = Modifier, boxes: List<Bounds>, timestamp: String = "14:22:09 · GPS Verified") {
+fun EvidenceCanvas(modifier: Modifier = Modifier, boxes: List<Bounds>, timestamp: String = "GPS Verified") {
     BoxWithConstraints(modifier.clip(RoundedCornerShape(8.dp))) {
         val wDp = maxWidth
         val hDp = maxHeight

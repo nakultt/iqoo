@@ -8,11 +8,14 @@ import com.geniex.sdk.bean.VlmChatMessage
 import java.io.IOException
 
 /**
- * Routes every AI task in the app: the on-device NPU model first, and — when
- * that is not resident or its generation fails — one fixed cloud model
- * ([OpenRouterClient.MODEL]) over OpenRouter. The fallback is automatic and
- * per-call: an officer never picks a backend, the answer just arrives from
- * wherever it could be produced.
+ * Routes every AI task in the app to one of two engines: the on-device NPU
+ * model (Qwen3-VL) or a fixed cloud model ([OpenRouterClient.MODEL]) over
+ * OpenRouter. The officer picks the engine in Settings ([mode]) and the chosen
+ * leg answers first; the other leg stays in the list as the safety net, so a
+ * mid-shift outage (NPU unloaded, no network, rejected key) degrades to an
+ * answer from the spare leg instead of a dead screen. Which leg actually
+ * answered is always disclosed — [lastBackend] records it and screens surface
+ * it rather than claiming "on-device" unconditionally.
  *
  * [InspectorAi] and [ChatSession] call this object instead of [NpuEngine]
  * directly, and screens read [isAvailable] rather than `NpuEngine.isReady`, so
@@ -20,9 +23,9 @@ import java.io.IOException
  * has no NPU time to spare) as long as the device is online.
  *
  * The trade-off is disclosure, not just capability: a cloud-served turn sends
- * the prompt and any attached photo off the handset. [lastBackend] records
- * which leg answered, and screens surface it rather than claiming "on-device"
- * unconditionally.
+ * the prompt and any attached photo off the handset. The engine selector and
+ * the per-reply disclosures exist so that cost is always visible before and
+ * after the fact.
  */
 object LlmGateway {
 
@@ -35,6 +38,25 @@ object LlmGateway {
         /** Answered by the OpenRouter fallback. */
         CLOUD,
     }
+
+    /** Which engine the officer has selected in Settings. */
+    enum class Mode {
+        /** On-device NPU first; cloud only as the safety net. */
+        LOCAL,
+
+        /** GLM-5.3-Flash over OpenRouter first; the NPU as the safety net. */
+        CLOUD,
+    }
+
+    /**
+     * The selected engine. [Mode.LOCAL] is the default and reproduces the
+     * original NPU-first routing exactly; [Mode.CLOUD] promotes the OpenRouter
+     * leg to primary for officers who want the stronger model or have no NPU
+     * time to spare. Deliberately not persisted: the app keeps all state in
+     * memory (see [com.veritransit.inspector.data.Repo]), and a fresh process
+     * starting on the private local leg is the safe default.
+     */
+    var mode by mutableStateOf(Mode.LOCAL)
 
     /** True while the Qwen3-VL bundle is resident (or being used) on the NPU. */
     val localReady: Boolean get() = NpuEngine.isReady
@@ -54,6 +76,19 @@ object LlmGateway {
     var lastBackend by mutableStateOf<Backend?>(null)
         private set
 
+    /** Model name + where it is answering from, for headers and status lines. */
+    val activeModelLabel: String
+        get() = when (lastBackend) {
+            Backend.NPU -> "${NpuEngine.DISPLAY_NAME} · on-device"
+            Backend.CLOUD -> "${OpenRouterClient.DISPLAY_NAME} · cloud"
+            null -> when {
+                mode == Mode.CLOUD && cloudReady -> "${OpenRouterClient.DISPLAY_NAME} · cloud"
+                localReady -> "${NpuEngine.DISPLAY_NAME} · on-device"
+                cloudReady -> "${OpenRouterClient.DISPLAY_NAME} · cloud fallback"
+                else -> "no AI backend available"
+            }
+        }
+
     /**
      * Prompt tokens (image tokens included) the answering backend reported for
      * the last completed exchange — [ChatSession]'s budget anchor, so the
@@ -66,21 +101,33 @@ object LlmGateway {
     var lastStats by mutableStateOf<String?>(null)
         private set
 
-    /** Model name + where it is answering from, for headers and status lines. */
-    val activeModelLabel: String
-        get() = when (lastBackend) {
-            Backend.NPU -> "${NpuEngine.DISPLAY_NAME} · on-device"
-            Backend.CLOUD -> "${OpenRouterClient.DISPLAY_NAME} · cloud"
-            null -> when {
-                NpuEngine.isReady -> "${NpuEngine.DISPLAY_NAME} · on-device"
-                OpenRouterClient.isConfigured -> "${OpenRouterClient.DISPLAY_NAME} · cloud fallback"
-                else -> "no AI backend available"
-            }
-        }
+    /** Can this leg serve a call right now? */
+    private fun legReady(leg: Backend): Boolean = when (leg) {
+        Backend.NPU -> localReady
+        Backend.CLOUD -> cloudReady
+    }
 
     /**
-     * One stateless task turn (OCR, reconciliation, remark drafting): local
-     * first, cloud only when the NPU is not resident or the generation failed.
+     * The legs that may serve the next call, preferred engine first. Selecting
+     * an engine decides who answers first, not who may answer at all: the
+     * spare leg stays eligible so a mid-shift outage on the preferred one
+     * degrades to an answer (disclosed via [lastBackend]) instead of a dead
+     * screen.
+     */
+    private fun legOrder(): List<Backend> {
+        val preferred = when (mode) {
+            Mode.CLOUD -> if (cloudReady) Backend.CLOUD else Backend.NPU
+            Mode.LOCAL -> if (localReady) Backend.NPU else Backend.CLOUD
+        }
+        return buildList {
+            add(preferred)
+            add(if (preferred == Backend.NPU) Backend.CLOUD else Backend.NPU)
+        }.filter { legReady(it) }
+    }
+
+    /**
+     * One stateless task turn (OCR, reconciliation, remark drafting): the
+     * selected engine first, the spare leg only if that fails.
      */
     suspend fun run(
         systemPrompt: String,
@@ -93,40 +140,55 @@ object LlmGateway {
         onLegSwitch: () -> Unit = {},
     ): Result<String> {
         stopRequested = false
-        var localEmitted = false
-        if (NpuEngine.isReady) {
-            val local = NpuEngine.run(
-                systemPrompt = systemPrompt,
-                userPrompt = userPrompt,
-                imagePaths = imagePaths,
-                maxTokens = maxTokens,
-                temperature = temperature,
-                label = label,
-                onToken = { token ->
-                    localEmitted = true
-                    onToken(token)
-                },
-            )
-            if (local.isSuccess) {
-                recordNpu()
-                return local
+        val order = legOrder()
+        if (order.isEmpty()) {
+            return Result.failure(IllegalStateException("No AI backend available"))
+        }
+        var lastFailure: Result<String>? = null
+        var emitted = false
+        for ((index, leg) in order.withIndex()) {
+            val result = when (leg) {
+                Backend.NPU -> NpuEngine.run(
+                    systemPrompt = systemPrompt,
+                    userPrompt = userPrompt,
+                    imagePaths = imagePaths,
+                    maxTokens = maxTokens,
+                    temperature = temperature,
+                    label = label,
+                    onToken = { token ->
+                        emitted = true
+                        onToken(token)
+                    },
+                )
+                Backend.CLOUD -> OpenRouterClient.chat(
+                    systemPrompt = systemPrompt,
+                    userPrompt = userPrompt,
+                    imagePaths = imagePaths,
+                    maxTokens = maxTokens,
+                    temperature = temperature,
+                    onToken = { token ->
+                        emitted = true
+                        onToken(token)
+                    },
+                )
             }
-            logFallback(local.exceptionOrNull())
+            if (result.isSuccess) {
+                record(leg)
+                return result
+            }
+            lastFailure = result
+            logFailover(leg, isLastLeg = index == order.lastIndex, cause = result.exceptionOrNull())
             // A Stop the user pressed must not turn into a fresh paid
             // generation on the other leg.
             if (stopRequested) return Result.failure(IOException("Generation stopped"))
-            // The dead leg may have fed the caller's accumulator already;
-            // the cloud stream must start from a clean slate.
-            if (localEmitted) onLegSwitch()
+            // The dead leg may have fed the caller's accumulator already; the
+            // next leg's stream must start from a clean slate.
+            if (emitted) {
+                onLegSwitch()
+                emitted = false
+            }
         }
-        return OpenRouterClient.chat(
-            systemPrompt = systemPrompt,
-            userPrompt = userPrompt,
-            imagePaths = imagePaths,
-            maxTokens = maxTokens,
-            temperature = temperature,
-            onToken = onToken,
-        ).onSuccess { recordCloud() }
+        return requireNotNull(lastFailure)
     }
 
     /**
@@ -143,32 +205,47 @@ object LlmGateway {
         onLegSwitch: () -> Unit = {},
     ): Result<String> {
         stopRequested = false
-        var localEmitted = false
-        if (NpuEngine.isReady) {
-            val local = NpuEngine.converse(
-                turns = turns,
-                mediaTurn = mediaTurn,
-                maxTokens = maxTokens,
-                temperature = temperature,
-                onToken = { token ->
-                    localEmitted = true
-                    onToken(token)
-                },
-            )
-            if (local.isSuccess) {
-                recordNpu()
-                return local
-            }
-            logFallback(local.exceptionOrNull())
-            if (stopRequested) return Result.failure(IOException("Generation stopped"))
-            if (localEmitted) onLegSwitch()
+        val order = legOrder()
+        if (order.isEmpty()) {
+            return Result.failure(IllegalStateException("No AI backend available"))
         }
-        return OpenRouterClient.converse(
-            turns = turns,
-            maxTokens = maxTokens,
-            temperature = temperature,
-            onToken = onToken,
-        ).onSuccess { recordCloud() }
+        var lastFailure: Result<String>? = null
+        var emitted = false
+        for ((index, leg) in order.withIndex()) {
+            val result = when (leg) {
+                Backend.NPU -> NpuEngine.converse(
+                    turns = turns,
+                    mediaTurn = mediaTurn,
+                    maxTokens = maxTokens,
+                    temperature = temperature,
+                    onToken = { token ->
+                        emitted = true
+                        onToken(token)
+                    },
+                )
+                Backend.CLOUD -> OpenRouterClient.converse(
+                    turns = turns,
+                    maxTokens = maxTokens,
+                    temperature = temperature,
+                    onToken = { token ->
+                        emitted = true
+                        onToken(token)
+                    },
+                )
+            }
+            if (result.isSuccess) {
+                record(leg)
+                return result
+            }
+            lastFailure = result
+            logFailover(leg, isLastLeg = index == order.lastIndex, cause = result.exceptionOrNull())
+            if (stopRequested) return Result.failure(IOException("Generation stopped"))
+            if (emitted) {
+                onLegSwitch()
+                emitted = false
+            }
+        }
+        return requireNotNull(lastFailure)
     }
 
     /** Stops the in-flight generation on whichever backend is streaming. */
@@ -180,18 +257,30 @@ object LlmGateway {
 
     /**
      * Set by [stop] and cleared at the start of the next call, so a stopped
-     * local leg is reported as stopped rather than silently re-served by the
-     * cloud leg.
+     * leg is reported as stopped rather than silently re-served by the spare.
      */
     @Volatile
     private var stopRequested = false
 
-    private fun logFallback(cause: Throwable?) {
-        Log.w(
-            TAG,
-            "NPU leg failed — falling back to ${OpenRouterClient.DISPLAY_NAME}: " +
-                (cause?.message ?: "unknown error"),
-        )
+    private fun logFailover(leg: Backend, isLastLeg: Boolean, cause: Throwable?) {
+        if (isLastLeg) {
+            Log.w(TAG, "${legName(leg)} failed — no spare leg left: ${cause?.message ?: "unknown error"}")
+            return
+        }
+        val to = if (leg == Backend.NPU) OpenRouterClient.DISPLAY_NAME else "${NpuEngine.DISPLAY_NAME} (NPU)"
+        Log.w(TAG, "${legName(leg)} failed — failing over to $to: ${cause?.message ?: "unknown error"}")
+    }
+
+    private fun legName(leg: Backend): String = when (leg) {
+        Backend.NPU -> "Local (NPU) leg"
+        Backend.CLOUD -> "Cloud (${OpenRouterClient.DISPLAY_NAME}) leg"
+    }
+
+    private fun record(leg: Backend) {
+        when (leg) {
+            Backend.NPU -> recordNpu()
+            Backend.CLOUD -> recordCloud()
+        }
     }
 
     private fun recordNpu() {

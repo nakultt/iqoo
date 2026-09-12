@@ -79,10 +79,10 @@ import java.io.File
 
 /**
  * Free-form conversation with the model — the same pipeline the inspection
- * steps use ([LlmGateway]: NPU first, cloud fallback), without the structured
- * prompts wrapped around it. Useful for asking the model about a load
- * directly, and for checking it is actually alive before starting an
- * inspection.
+ * steps use ([LlmGateway]: selected engine first, the spare leg as backup),
+ * without the structured prompts wrapped around it. Useful for asking the
+ * model about a load directly, and for checking it is actually alive before
+ * starting an inspection.
  */
 @Composable
 fun ChatScreen(session: ChatSession, onBack: () -> Unit) {
@@ -146,12 +146,17 @@ fun ChatScreen(session: ChatSession, onBack: () -> Unit) {
         if (!NpuEngine.isReady) {
             Box(Modifier.padding(16.dp)) {
                 NoticeStrip(
-                    if (LlmGateway.cloudReady) {
-                        "The on-device model is not loaded — replies come from " +
-                            OpenRouterClient.DISPLAY_NAME + " via OpenRouter until it is."
-                    } else {
-                        "The on-device model is not loaded and this build has no " +
-                            "cloud key — AI is unavailable on this screen."
+                    when {
+                        LlmGateway.mode == LlmGateway.Mode.CLOUD && LlmGateway.cloudReady ->
+                            "Cloud engine selected — replies come from " +
+                                OpenRouterClient.DISPLAY_NAME + " via OpenRouter. Switch to " +
+                                "Local NPU in Settings to keep turns on the handset."
+                        LlmGateway.cloudReady ->
+                            "The on-device model is not loaded — replies come from " +
+                                OpenRouterClient.DISPLAY_NAME + " via OpenRouter until it is."
+                        else ->
+                            "The on-device model is not loaded and this build has no " +
+                                "cloud key — AI is unavailable on this screen."
                     },
                 )
             }
@@ -413,11 +418,11 @@ private fun EmptyState() {
         Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Talk to the model", style = MaterialTheme.typography.titleMedium, color = VT.Ink)
             Text(
-                "By default every prompt, photo and reply runs through the " +
-                    "Hexagon NPU and never leaves the handset. When the on-device " +
-                    "model is not loaded, the conversation falls back to " +
-                    OpenRouterClient.DISPLAY_NAME + " on OpenRouter — that turn's " +
-                    "prompt and photo are sent to it.",
+                "Two engines, switchable in Settings → AI engine: the on-device " +
+                    "Hexagon NPU — nothing leaves the handset — and " +
+                    OpenRouterClient.DISPLAY_NAME + " on OpenRouter, where that turn's " +
+                    "prompt and photo are sent to it. The selected engine answers first; " +
+                    "the other only steps in if it fails, and each reply shows which one did.",
                 style = MaterialTheme.typography.bodySmall,
                 color = VT.Muted,
                 lineHeight = 19.sp,

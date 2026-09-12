@@ -52,6 +52,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -77,7 +78,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.camera.core.ImageAnalysis
 import androidx.core.content.ContextCompat
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.common.InputImage
 import com.veritransit.inspector.ai.EvidenceCamera
 import com.veritransit.inspector.ai.LlmGateway
 import com.veritransit.inspector.ai.EvidenceViewfinder
@@ -86,6 +90,7 @@ import com.veritransit.inspector.ai.NpuEngine
 import com.veritransit.inspector.ai.OpenRouterClient
 import com.veritransit.inspector.data.Manifest
 import com.veritransit.inspector.data.Presets
+import com.veritransit.inspector.data.QrBill
 import com.veritransit.inspector.ui.BillSections
 import com.veritransit.inspector.ui.InspectionFlowState
 import com.veritransit.inspector.ui.components.FieldLabel
@@ -126,13 +131,13 @@ fun ScanScreen(
     ) {
         FlowHeader(
             title = "Load E-Way Bill",
-            subtitle = "Step 1 of 3",
+            subtitle = "QR code or bill photo",
             onBack = onBack,
             trailing = { StepBadge(1) },
         )
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Segmented(mode) { mode = it }
-            if (mode == 0) Viewfinder(flow, onDetected, feedback) else ManualEntry(flow, feedback)
+            if (mode == 0) Viewfinder(flow, onDetected, feedback) else ManualEntry(flow, feedback, onContinue)
         }
     }
 }
@@ -241,6 +246,63 @@ private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedba
     var reading by remember { mutableStateOf(false) }
     var readError by remember { mutableStateOf<String?>(null) }
 
+    // Real QR decoding on the live frames, so the printed bill code locks the
+    // step on its own — the capture button stays for the full-document OCR
+    // read, which the QR alone (often just the bill number) cannot replace.
+    // The analyzer is bound while the QR segment is showing; the guards inside
+    // keep a stale frame from re-locking an already-resolved step.
+    // No format filter: the printed code on an E-Way Bill may be a QR or a
+    // 1D barcode, and the default scanner covers every supported format.
+    val scanner = remember { BarcodeScanning.getClient() }
+    DisposableEffect(scanner) { onDispose { scanner.close() } }
+
+    fun onQrScanned(payload: String) {
+        if (reading || flow.detected) return
+        val fields = QrBill.parse(payload)
+        val p = Presets.DEFAULT
+        val ewb = fields.ewb ?: payload.take(28)
+        flow.manifest = Manifest(
+            ewb = ewb,
+            vehicle = fields.vehicle ?: "—",
+            vehicleModel = p.vehicleModel,
+            consignment = p.name,
+            route = p.route,
+            distanceKm = p.distanceKm,
+            items = p.items.map { it.copy(found = it.expected) },
+            ref = "#" + (fields.ewb?.filter { it.isDigit() }?.takeLast(4) ?: "QR"),
+        )
+        // The QR carries identifiers, not the goods table — the officer
+        // confirms the declared lines on the manifest step, exactly as after
+        // a manual entry.
+        flow.ewbInput = ewb
+        flow.vehicleInput = fields.vehicle ?: ""
+        flow.billSections = null
+        flow.qrResolved = true
+        if (hapticsEnabled) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+        flow.detected = true
+    }
+
+    val qrAnalyzer = remember(cameraGranted) {
+        if (!cameraGranted) {
+            null
+        } else {
+            ImageAnalysis.Analyzer { proxy ->
+                val mediaImage = proxy.image
+                if (mediaImage == null) {
+                    proxy.close()
+                    return@Analyzer
+                }
+                val input = InputImage.fromMediaImage(mediaImage, proxy.imageInfo.rotationDegrees)
+                scanner.process(input)
+                    .addOnSuccessListener { codes ->
+                        val payload = codes.firstOrNull()?.rawValue
+                        if (!payload.isNullOrBlank()) onQrScanned(payload)
+                    }
+                    .addOnCompleteListener { proxy.close() }
+            }
+        }
+    }
+
     fun captureAndRead() {
         if (reading || !camera.ready) return
         reading = true
@@ -299,6 +361,7 @@ private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedba
         if (flow.detected) {
             feedback(
                 when {
+                    flow.qrResolved -> "QR code scanned · bill ${flow.manifest?.ewb}"
                     !flow.manifestFromAi -> "Manifest resolved · E-Way Bill locked"
                     LlmGateway.lastBackend == LlmGateway.Backend.CLOUD ->
                         "E-Way Bill read · GLM-5.3-Flash (cloud)"
@@ -323,7 +386,7 @@ private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedba
                 },
         ) {
             if (live) {
-                EvidenceViewfinder(camera, Modifier.fillMaxSize())
+                EvidenceViewfinder(camera, Modifier.fillMaxSize(), analyzer = qrAnalyzer)
             } else Canvas(Modifier.fillMaxSize()) {
                 val w = size.width
                 val h = size.height
@@ -425,7 +488,7 @@ private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedba
                 when {
                     reading -> "Reading document…"
                     flow.detected -> "Manifest captured"
-                    live -> "Fill the frame with the E-Way Bill"
+                    live -> "Hold the bill's QR code in frame — or capture to read it"
                     else -> "Align QR code or barcode within frame"
                 },
                 style = MaterialTheme.typography.bodyMedium,
@@ -445,8 +508,13 @@ private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedba
         if (live) {
             if (!NpuEngine.isReady) {
                 NoticeStrip(
-                    "The on-device model is not loaded — the bill photo will be " +
-                        "sent to ${OpenRouterClient.DISPLAY_NAME} on OpenRouter.",
+                    if (LlmGateway.mode == LlmGateway.Mode.CLOUD) {
+                        "Cloud engine selected — the bill photo is sent to " +
+                            OpenRouterClient.DISPLAY_NAME + " on OpenRouter."
+                    } else {
+                        "The on-device model is not loaded — the bill photo will be " +
+                            "sent to ${OpenRouterClient.DISPLAY_NAME} on OpenRouter."
+                    },
                 )
             }
             PrimaryButton(
@@ -534,7 +602,11 @@ private fun DetectedCard(flow: InspectionFlowState) {
 /* ------------------------------ Manual entry ------------------------------ */
 
 @Composable
-private fun ManualEntry(flow: InspectionFlowState, feedback: (String) -> Unit) {
+private fun ManualEntry(
+    flow: InspectionFlowState,
+    feedback: (String) -> Unit,
+    onContinue: () -> Unit,
+) {
     var ewb by remember { mutableStateOf(flow.ewbInput) }
     var vehicle by remember { mutableStateOf(flow.vehicleInput) }
     var presetIdx by remember { mutableStateOf(flow.presetIndex) }
@@ -642,6 +714,10 @@ private fun ManualEntry(flow: InspectionFlowState, feedback: (String) -> Unit) {
                     flow.billSections = null
                     flow.detected = true
                     feedback("Manifest drafted from manual entry")
+                    // Straight through to the manifest step — the pinned
+                    // "Continue" bar below only exists on the QR path, so
+                    // without this call manual entry dead-ends on this screen.
+                    onContinue()
                 }
             },
         )

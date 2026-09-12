@@ -17,3 +17,4 @@ dependencyResolutionManagement {
 rootProject.name = "VeriTransit"
 include(":app")
 include(":telegram-bot")
+include(":dashboard")

@@ -38,6 +38,10 @@ class InspectionFlowState {
     var manifestFromAi by mutableStateOf(false)
     var reconciledByAi by mutableStateOf(false)
 
+    /** True when the bill was resolved by decoding the printed QR code rather
+     *  than by a model read — drives the toast wording on this step. */
+    var qrResolved by mutableStateOf(false)
+
     /** Which backend reconciled the bay; null on the demo and manual paths.
      *  Captured once at read time — the gateway's lastBackend is global state
      *  that a later call (e.g. cloud note drafting) would overwrite. */
@@ -121,6 +125,7 @@ class InspectionFlowState {
         driverOk = false
         billEvidence = null
         manifestFromAi = false
+        qrResolved = false
         billSections = null
         resetForScan()
     }

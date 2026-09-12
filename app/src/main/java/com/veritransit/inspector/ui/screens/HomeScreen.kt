@@ -126,9 +126,9 @@ private fun Header() {
             )
         }
         Column(horizontalAlignment = Alignment.End) {
-            Text("Insp. Jenkins", style = MaterialTheme.typography.titleSmall, color = VT.Ink)
+            Text(Repo.INSPECTOR, style = MaterialTheme.typography.titleSmall, color = VT.Ink)
             Text(
-                "Badge #412",
+                "Badge ${Repo.BADGE}",
                 style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Medium, fontSize = 11.sp),
                 color = VT.Muted,
             )

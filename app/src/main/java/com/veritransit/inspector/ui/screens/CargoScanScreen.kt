@@ -166,7 +166,7 @@ fun CargoScanScreen(
     FlowScaffold(bottomBar = null) {
         FlowHeader(
             title = "Cargo Scan",
-            subtitle = "Step 3 of 3 · Bay Rig #3",
+            subtitle = "Optical count",
             onBack = onBack,
             trailing = { StepBadge(3) },
         )

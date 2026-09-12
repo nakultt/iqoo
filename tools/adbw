@@ -1,0 +1,883 @@
+#!/usr/bin/env bash
+#
+# adbw — cable-free (wireless) ADB workflow for VeriTransit.
+#
+# Android 11+ has "Wireless debugging" built in, so enabling ADB does NOT
+# require a USB cable. On the phone:
+#
+#   Settings -> About phone -> tap "Build number" 7x
+#   Settings -> System -> Developer options -> Wireless debugging -> ON
+#   then "Pair device with pairing code"
+#
+# Quick start:
+#   tools/adbw doctor              # preflight: adb, mDNS, JDK, network, devices
+#   tools/adbw pair                # find the pairing port, pair with the 6-digit code
+#   tools/adbw deploy --logcat     # build -> install -> launch -> tail logs
+#
+# Pairing is required once per phone. After that `connect` (or `deploy`) reuses
+# the persistent debugging port until wireless debugging is switched off.
+#
+set -uo pipefail
+
+# ---------------------------------------------------------------------------
+# paths & constants
+# ---------------------------------------------------------------------------
+
+SELF="$0"
+while [ -L "$SELF" ]; do SELF="$(cd "$(dirname "$SELF")" && pwd)/$(basename "$SELF")"; SELF="$(readlink "$SELF")"; done
+ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+
+APP_ID="com.veritransit.inspector"
+COMPONENT="com.veritransit.inspector/.MainActivity"
+APK_DEBUG="app/build/outputs/apk/debug/app-debug.apk"
+APK_RELEASE="app/build/outputs/apk/release/app-release.apk"
+
+STATE_DIR="$ROOT/tools/.state"
+STATE_FILE="$STATE_DIR/wireless.env"
+
+PAIR_SVC="_adb-tls-pairing._tcp"
+CONN_SVC="_adb-tls-connect._tcp"
+
+# Gradle 8.14.3 runs on Java 17-24; AGP 8.13.2 requires >= 17. Java 25 is too new.
+JDK_MIN=17
+JDK_MAX=24
+JDK_PREFERRED=21
+
+# ---------------------------------------------------------------------------
+# output helpers
+# ---------------------------------------------------------------------------
+
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    C_OK=$'\033[32m'; C_NO=$'\033[31m'; C_WARN=$'\033[33m'
+    C_DIM=$'\033[2m'; C_B=$'\033[1m'; C_OFF=$'\033[0m'
+else
+    C_OK=; C_NO=; C_WARN=; C_DIM=; C_B=; C_OFF=
+fi
+
+ok()   { printf '  %s✓%s %s\n' "$C_OK"   "$C_OFF" "$*"; }
+bad()  { printf '  %s✗%s %s\n' "$C_NO"   "$C_OFF" "$*"; }
+warn() { printf '  %s!%s %s\n' "$C_WARN" "$C_OFF" "$*"; }
+info() { printf '  %s·%s %s\n' "$C_DIM"  "$C_OFF" "$*"; }
+hint() { printf '      %s%s%s\n' "$C_DIM" "$*" "$C_OFF"; }
+head_() { printf '\n%s%s%s\n' "$C_B" "$*" "$C_OFF"; }
+die()  { printf '\n%serror:%s %s\n\n' "$C_NO" "$C_OFF" "$*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# adb discovery
+# ---------------------------------------------------------------------------
+
+require_adb() {
+    command -v adb >/dev/null 2>&1 || die "adb not found on PATH.
+  Install it with:  brew install --cask android-platform-tools"
+}
+
+adb_bin() { command -v adb; }
+
+mdns_raw() { adb mdns services 2>/dev/null || true; }
+
+# Count non-empty lines in a string. `grep -c` exits non-zero when it matches
+# nothing, which would otherwise trip `set -e`-style handling in callers.
+count_lines() { printf '%s\n' "${1:-}" | grep -c . 2>/dev/null || true; }
+
+# Extract "ip:port" for a given mDNS service type from `adb mdns services`.
+# Output is "<instance> <type> <addr>:<port>", one per line after a header.
+svc_endpoints() {
+    mdns_raw | awk -v t="$1" '
+        index($0, t) {
+            split($NF, a, ":")
+            if (a[1] ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && a[2] != "") print a[1] ":" a[2]
+        }
+    ' | sort -u
+}
+
+# Restrict endpoints to one host IP — how we pick OUR phone out of a shared
+# office network where colleagues' devices also advertise ADB.
+svc_endpoints_on_ip() {
+    svc_endpoints "$1" | awk -F: -v ip="$2" '$1 == ip'
+}
+
+# Poll for a service to appear. The pairing service only exists while the
+# "Pair device with pairing code" dialog is open, so this must be immediate.
+# Prints every match, one per line, so callers can detect ambiguity.
+# usage: wait_for_service <type> <timeout-seconds>
+wait_for_service() {
+    local type="$1" timeout="${2:-60}" start now found
+    start=$(date +%s)
+    while :; do
+        found="$(svc_endpoints "$type")"
+        if [ -n "$found" ]; then printf '\n' >&2; printf '%s\n' "$found"; return 0; fi
+        now=$(date +%s)
+        [ $((now - start)) -ge "$timeout" ] && { printf '\n' >&2; return 1; }
+        printf '.' >&2
+        sleep 1
+    done
+}
+
+# TCP reachability test — distinguishes "port closed" from "host unreachable",
+# which is the difference between a wrong port and Wi-Fi client isolation.
+tcp_open() {
+    local hp="$1" h p
+    h="${hp%%:*}"; p="${hp##*:}"
+    command -v nc >/dev/null 2>&1 || return 2
+    nc -z -G 3 -w 3 "$h" "$p" >/dev/null 2>&1
+}
+
+# ---------------------------------------------------------------------------
+# state
+# ---------------------------------------------------------------------------
+
+state_save() {
+    mkdir -p "$STATE_DIR" 2>/dev/null || return 0
+    {
+        printf '# written by tools/adbw — safe to delete\n'
+        [ -n "${1:-}" ] && printf 'LAST_HOST=%s\n' "$1"
+        [ -n "${2:-}" ] && printf 'LAST_PHONE_IP=%s\n' "$2"
+    } > "$STATE_FILE" 2>/dev/null || true
+}
+
+state_load() {
+    # shellcheck disable=SC1090
+    [ -f "$STATE_FILE" ] && . "$STATE_FILE" 2>/dev/null
+    printf '%s' "${LAST_HOST:-}"
+}
+
+state_load_ip() {
+    # shellcheck disable=SC1090
+    [ -f "$STATE_FILE" ] && . "$STATE_FILE" 2>/dev/null
+    printf '%s' "${LAST_PHONE_IP:-}"
+}
+
+# True when more than one host is advertising ADB on this network — i.e. we
+# must not guess which one is the user's phone.
+ambiguous_network() {
+    local eps
+    eps="$(svc_endpoints "$CONN_SVC")"
+    [ "$(count_lines "$eps")" -gt 1 ]
+}
+
+# Refuse to silently target a device that might belong to someone else.
+guard_ambiguous() {
+    ambiguous_network || return 0
+    local saved_ip
+    saved_ip="$(state_load_ip)"
+    [ -n "$saved_ip" ] && return 0
+    printf '\n'
+    warn "multiple devices on this network are advertising ADB:"
+    svc_endpoints "$CONN_SVC" | sed 's/^/        /'
+    hint "adbw will NOT guess — picking the wrong one could target a colleague's phone."
+    hint "identify yours by pairing it:  tools/adbw pair <CODE>"
+    hint "or target it explicitly:       tools/adbw connect <YOUR_PHONE_IP:PORT>"
+    printf '\n'
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# JDK resolution
+# ---------------------------------------------------------------------------
+# The repo's build needs a real JDK 17-24. A stale JAVA_HOME pointing at a
+# removed Android Studio breaks `./gradlew` entirely, so resolve independently.
+
+java_major() {
+    local jh="$1" out first second
+    [ -x "$jh/bin/java" ] || return 1
+    out="$("$jh/bin/java" -version 2>&1 | head -n 1)"
+    first="$(printf '%s' "$out" | sed -n 's/.*version "\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1/p')"
+    second="$(printf '%s' "$out" | sed -n 's/.*version "\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\2/p')"
+    [ -n "$first" ] || return 1
+    if [ "$first" = "1" ]; then printf '%s' "$second"; else printf '%s' "$first"; fi
+}
+
+jdk_candidates() {
+    local v p jp
+    [ -n "${ADBW_JAVA_HOME:-}" ] && printf '%s\n' "$ADBW_JAVA_HOME"
+    [ -n "${JAVA_HOME:-}" ] && printf '%s\n' "$JAVA_HOME"
+    for v in 21 17 24 23 22 20 19 18; do
+        for p in "/opt/homebrew/opt/openjdk@$v/libexec/openjdk.jdk/Contents/Home" \
+                 "/usr/local/opt/openjdk@$v/libexec/openjdk.jdk/Contents/Home"; do
+            [ -d "$p" ] && printf '%s\n' "$p"
+        done
+    done
+    for p in /Library/Java/JavaVirtualMachines/*/Contents/Home; do
+        [ -d "$p" ] && printf '%s\n' "$p"
+    done
+    p="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+    [ -d "$p" ] && printf '%s\n' "$p"
+    if jp="$(command -v java 2>/dev/null)"; then
+        jp="$(cd "$(dirname "$jp")/.." 2>/dev/null && pwd)" && printf '%s\n' "$jp"
+    fi
+    return 0
+}
+
+# Prefer the pinned LTS, else the highest version inside the supported window.
+resolve_jdk() {
+    local best="" best_major=0 p m
+    while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        m="$(java_major "$p")" || continue
+        [ -n "$m" ] || continue
+        [ "$m" -ge "$JDK_MIN" ] && [ "$m" -le "$JDK_MAX" ] || continue
+        if [ "$m" -eq "$JDK_PREFERRED" ]; then printf '%s' "$p"; return 0; fi
+        if [ "$m" -gt "$best_major" ]; then best_major="$m"; best="$p"; fi
+    done < <(jdk_candidates | awk '!seen[$0]++')
+    [ -n "$best" ] && printf '%s' "$best"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# device selection
+# ---------------------------------------------------------------------------
+
+connected_devices() {
+    adb devices 2>/dev/null | awk 'NR>1 && $2=="device" { print $1 }'
+}
+
+# Resolve which device to operate on: explicit > single > saved phone > fail.
+# Never guesses between multiple devices, since a colleague's phone may be
+# reachable on the same office network.
+resolve_serial() {
+    local serial="" n
+    if [ -n "${ADBW_SERIAL:-}" ]; then printf '%s' "$ADBW_SERIAL"; return 0; fi
+
+    local all
+    all="$(connected_devices)"
+    n="$(count_lines "$all")"
+
+    if [ "${WIRELESS_ONLY:-0}" = "1" ]; then
+        serial="$(printf '%s\n' "$all" | grep ':' | head -n 1)"
+        [ -n "$serial" ] && { printf '%s' "$serial"; return 0; }
+        return 1
+    fi
+
+    if [ "$n" -eq 1 ]; then printf '%s' "$all"; return 0; fi
+
+    if [ "$n" -gt 1 ]; then
+        local saved_ip saved_host
+        saved_ip="$(state_load_ip)"
+        saved_host="$(state_load)"
+        # Only auto-pick a wireless device we have positively identified.
+        if [ -n "$saved_ip" ] && printf '%s\n' "$all" | grep -q "^$saved_ip:"; then
+            serial="$(printf '%s\n' "$all" | grep "^$saved_ip:" | head -n 1)"
+            printf '%s' "$serial"; return 0
+        fi
+        if [ -n "$saved_host" ] && printf '%s\n' "$all" | grep -qx "$saved_host"; then
+            printf '%s' "$saved_host"; return 0
+        fi
+        return 1
+    fi
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# commands
+# ---------------------------------------------------------------------------
+
+cmd_doctor() {
+    printf '\n%sVeriTransit — wireless ADB preflight%s\n' "$C_B" "$C_OFF"
+
+    head_ "adb"
+    if command -v adb >/dev/null 2>&1; then
+        local av
+        av="$(adb version 2>/dev/null | head -n 1 | sed 's/Android Debug Bridge version //')"
+        ok "adb $av at $(adb_bin)"
+        ok "adb server running"
+    else
+        bad "adb not found on PATH"
+        hint "fix: brew install --cask android-platform-tools"
+        printf '\n'
+        return 1
+    fi
+
+    local mcheck
+    mcheck="$(adb mdns check 2>&1 || true)"
+    case "$mcheck" in
+        *[Ee][Rr][Rr][Oo][Rr]*|"") bad "mDNS discovery unavailable — wireless discovery will not work"
+                                     hint "output: ${mcheck:-<empty>}" ;;
+        *) ok "mDNS discovery available" ;;
+    esac
+
+    head_ "toolchain"
+    local jdk jm
+    jdk="$(resolve_jdk)"; jm=""
+    if [ -n "$jdk" ]; then
+        jm="$(java_major "$jdk")"
+        ok "JDK $jm — $jdk"
+    else
+        bad "no usable JDK $JDK_MIN-$JDK_MAX found"
+        hint "fix: brew install openjdk@21"
+    fi
+
+    if [ -n "${JAVA_HOME:-}" ]; then
+        if [ -x "$JAVA_HOME/bin/java" ]; then
+            local jhm; jhm="$(java_major "$JAVA_HOME")"
+            if [ -n "$jhm" ] && [ "$jhm" -ge "$JDK_MIN" ] && [ "$jhm" -le "$JDK_MAX" ]; then
+                ok "JAVA_HOME valid (JDK $jhm)"
+            else
+                warn "JAVA_HOME points at JDK ${jhm:-unknown}, outside the supported $JDK_MIN-$JDK_MAX"
+                hint "adbw overrides it internally; your own ./gradlew calls may still fail"
+            fi
+        else
+            bad "JAVA_HOME is set to a missing directory: $JAVA_HOME"
+            hint "this breaks every ./gradlew call from your shell"
+            [ -n "$jdk" ] && hint "fix: export JAVA_HOME=\"$jdk\"   (add to ~/.zshrc)"
+        fi
+    else
+        ok "JAVA_HOME not set (adbw resolves a JDK itself)"
+    fi
+
+    if [ -f "$ROOT/gradlew" ]; then
+        ok "gradle wrapper present ($(grep -o 'gradle-[0-9.]*-bin' "$ROOT/gradle/wrapper/gradle-wrapper.properties" 2>/dev/null | head -n1))"
+    else
+        bad "gradlew missing at $ROOT"
+    fi
+
+    head_ "build artifacts"
+    local apk
+    for apk in "$APK_DEBUG" "$APK_RELEASE"; do
+        if [ -f "$ROOT/$apk" ]; then
+            ok "$apk ($(ls -lh "$ROOT/$apk" | awk '{print $5}'))"
+        else
+            info "$apk not built yet"
+        fi
+    done
+
+    head_ "network"
+    local ip="" ifc
+    for ifc in en0 en1 en2; do
+        ip="$(ipconfig getifaddr "$ifc" 2>/dev/null || true)"
+        [ -n "$ip" ] && { ok "this Mac: $ip ($ifc)"; break; }
+    done
+    [ -z "$ip" ] && warn "no LAN IPv4 address found — are you on Wi-Fi?"
+    local gw
+    gw="$(route -n get default 2>/dev/null | awk '/gateway/ {print $2}')"
+    [ -n "$gw" ] && info "gateway: $gw"
+
+    head_ "devices"
+    local devs
+    devs="$(connected_devices)"
+    if [ -n "$devs" ]; then
+        printf '%s\n' "$devs" | while IFS= read -r d; do
+            case "$d" in *:*) ok "wireless  $d" ;; *) ok "usb/emu   $d" ;; esac
+        done
+    else
+        info "none connected"
+    fi
+
+    local saved
+    saved="$(state_load)"
+    [ -n "$saved" ] && info "last paired: $saved"
+
+    head_ "wireless debugging"
+    local pair_eps conn_eps
+    pair_eps="$(svc_endpoints "$PAIR_SVC")"
+    conn_eps="$(svc_endpoints "$CONN_SVC")"
+    if [ -n "$conn_eps" ]; then
+        printf '%s\n' "$conn_eps" | while IFS= read -r e; do ok "connect service at $e"; done
+    elif [ -n "$pair_eps" ]; then
+        printf '%s\n' "$pair_eps" | while IFS= read -r e; do ok "pairing dialog open at $e"; done
+        hint "run: tools/adbw pair <CODE>"
+    else
+        warn "no wireless debugging service discovered"
+        hint "on the phone: Developer options -> Wireless debugging -> ON"
+        hint "if it IS on, the cause is almost always one of:"
+        hint "  1. Wi-Fi client isolation (common on office/guest networks)"
+        hint "     -> same network is not enough; clients must be allowed to talk"
+        hint "  2. macOS Local Network permission for your terminal"
+        hint "     -> System Settings -> Privacy & Security -> Local Network"
+        hint "  3. phone on a different band/VLAN than this Mac"
+        hint "fallback: read 'IP address & Port' off the pairing dialog and run"
+        hint "     tools/adbw pair <CODE> <IP:PORT>"
+    fi
+
+    if [ -n "$saved" ] && [ -z "$devs" ]; then
+        if tcp_open "$saved"; then
+            ok "$saved is reachable — run: tools/adbw connect"
+        else
+            warn "$saved not reachable (port closed or host down)"
+        fi
+    fi
+
+    printf '\n'
+}
+
+cmd_pair() {
+    local code="" hostport="" a
+    for a in "$@"; do
+        case "$a" in
+            *:*) hostport="$a" ;;
+            [0-9][0-9][0-9][0-9][0-9][0-9]) code="$a" ;;
+            *) die "unrecognized argument: $a
+  usage: tools/adbw pair [CODE] [HOST:PORT]" ;;
+        esac
+    done
+
+    head_ "pairing"
+    info "on the phone: Developer options -> Wireless debugging -> Pair device with pairing code"
+
+    if [ -z "$hostport" ]; then
+        printf '  %swaiting for the pairing service%s ' "$C_DIM" "$C_OFF" >&2
+        local found
+        found="$(wait_for_service "$PAIR_SVC" "${PAIR_TIMEOUT:-90}")" \
+            || die "no pairing service appeared within ${PAIR_TIMEOUT:-90}s.
+  The pairing dialog must be OPEN on the phone, and this Mac must be able to
+  see it over Wi-Fi (see: tools/adbw doctor -> wireless debugging)."
+
+        local n
+        n="$(count_lines "$found")"
+        if [ "$n" -gt 1 ]; then
+            # Several colleagues may have their pairing dialog open at once.
+            warn "multiple pairing services found:"
+            printf '%s\n' "$found" | sed 's/^/        /'
+            printf '  %senter YOUR phone'\''s IP:Port from the dialog: %s' "$C_DIM" "$C_OFF" >&2
+            read -r hostport
+            [ -n "$hostport" ] || die "no address provided"
+        else
+            hostport="$found"
+        fi
+        info "pairing service at $hostport"
+    else
+        info "using pairing address $hostport"
+    fi
+
+    if [ -z "$code" ]; then
+        printf '  enter the 6-digit code shown on the phone: ' >&2
+        read -r code
+    fi
+    [ -n "$code" ] || die "no pairing code provided"
+
+    printf '\n'
+    if ! adb pair "$hostport" "$code"; then
+        die "pairing failed.
+  - codes expire fast: reopen the dialog and retry immediately
+  - the port changes every time the dialog opens; let adbw discover it
+  - verify reachability: tools/adbw probe $hostport"
+    fi
+
+    # Remember which IP is OUR phone so later commands never target a colleague's.
+    local phone_ip="${hostport%%:*}"
+    state_save "" "$phone_ip"
+    ok "paired (phone: $phone_ip)"
+
+    head_ "connecting"
+    sleep 1
+    cmd_connect
+}
+
+cmd_connect() {
+    local hostport="${1:-}"
+
+    if [ -z "$hostport" ]; then
+        local saved saved_ip
+        saved="$(state_load)"
+        saved_ip="$(state_load_ip)"
+
+        # Preferred: our phone's remembered IP, on whatever port it now uses.
+        if [ -n "$saved_ip" ]; then
+            hostport="$(svc_endpoints_on_ip "$CONN_SVC" "$saved_ip" | head -n 1)"
+            if [ -n "$hostport" ]; then
+                info "using your phone ($saved_ip) at $hostport"
+            elif tcp_open "$saved"; then
+                hostport="$saved"
+                info "using last known address $hostport"
+            fi
+        fi
+
+        if [ -z "$hostport" ]; then
+            local eps n
+            eps="$(svc_endpoints "$CONN_SVC")"
+            n="$(count_lines "$eps")"
+
+            if [ "$n" -gt 1 ]; then
+                # Never guess between several advertised devices.
+                guard_ambiguous || die "cannot pick a device automatically.
+  Tell adbw which is yours:  tools/adbw connect <YOUR_PHONE_IP:PORT>"
+            fi
+
+            if [ "$n" -eq 0 ]; then
+                printf '  %swaiting for the connect service%s ' "$C_DIM" "$C_OFF" >&2
+                eps="$(wait_for_service "$CONN_SVC" "${CONNECT_TIMEOUT:-45}")" \
+                    || die "no wireless debugging service found.
+  Is Wireless debugging switched ON, on the same network as this Mac?
+  See: tools/adbw doctor -> wireless debugging"
+            fi
+            hostport="$(printf '%s\n' "$eps" | head -n 1)"
+        fi
+    fi
+
+    adb connect "$hostport" >/dev/null 2>&1 || true
+    sleep 1
+
+    if adb devices 2>/dev/null | awk '{print $1}' | grep -qx "$hostport"; then
+        state_save "$hostport" "${hostport%%:*}"
+        ok "connected: $hostport"
+        printf '\n'
+        adb devices -l 2>/dev/null | sed 's/^/  /'
+        printf '\n'
+    else
+        die "could not connect to $hostport
+  - if you have never paired this phone: tools/adbw pair
+  - wireless debugging was toggled off: re-pair (the port changes)
+  - check reachability: tools/adbw probe $hostport"
+    fi
+}
+
+cmd_disconnect() {
+    # `adb disconnect` with no target drops every TCP device — including
+    # emulators, which appear as emulator-5554 but are TCP transports too.
+    # So enumerate the wireless (ip:port) devices and drop only those.
+    if [ "${1:-}" = "--all" ]; then
+        local targets
+        targets="$(adb devices 2>/dev/null | awk 'NR>1 && $2=="device" && $1 ~ /:/ { print $1 }')"
+        if [ -z "$targets" ]; then
+            info "no wireless devices were connected"
+            state_save ""
+            return 0
+        fi
+        printf '%s\n' "$targets" | while IFS= read -r t; do
+            adb disconnect "$t" >/dev/null 2>&1 || true
+            ok "disconnected: $t"
+        done
+        state_save ""
+        return 0
+    fi
+
+    local target="${1:-$(state_load)}"
+    [ -n "$target" ] || die "nothing to disconnect (no address given, none saved)"
+
+    case "$target" in
+        *:*) ;;
+        *) die "'$target' is not a wireless address (expected ip:port).
+  adbw only disconnects wireless devices — emulators are left alone." ;;
+    esac
+
+    adb disconnect "$target" >/dev/null 2>&1 || true
+    [ "$target" = "$(state_load)" ] && state_save ""
+    ok "disconnected: $target"
+}
+
+cmd_status() {
+    printf '\n%sdevices%s\n' "$C_B" "$C_OFF"
+    adb devices -l 2>/dev/null | sed 's/^/  /'
+    local saved
+    saved="$(state_load)"
+    printf '\n'
+    [ -n "$saved" ] && info "last paired: $saved"
+    local eps
+    eps="$(svc_endpoints "$CONN_SVC")"
+    if [ -n "$eps" ]; then
+        printf '%s\n' "$eps" | while IFS= read -r e; do ok "wireless service at $e"; done
+    else
+        info "no wireless debugging service advertised"
+    fi
+    printf '\n'
+}
+
+cmd_probe() {
+    local hp="${1:-}"
+    [ -n "$hp" ] || die "usage: tools/adbw probe HOST:PORT"
+    case "$hp" in *:*) ;; *) hp="$hp:5555" ;; esac
+    if tcp_open "$hp"; then
+        ok "$hp is reachable"
+    else
+        case $? in
+            2) die "nc not available; cannot probe" ;;
+            *) bad "$hp is NOT reachable (connection refused or timed out)"
+               hint "refused  -> wrong port, or wireless debugging toggled off"
+               hint "timed out -> likely Wi-Fi client isolation between clients" ;;
+        esac
+        return 1
+    fi
+}
+
+# Build with a JDK that Gradle actually supports.
+# Returns the APK path in the global BUILT_APK rather than on stdout, so that
+# build output and progress messages can never corrupt the value.
+BUILT_APK=""
+build_apk() {
+    local variant="$1" task apk jdk
+    case "$variant" in
+        release) task=":app:assembleRelease"; apk="$APK_RELEASE" ;;
+        *)       task=":app:assembleDebug";   apk="$APK_DEBUG" ;;
+    esac
+
+    jdk="$(resolve_jdk)"
+    [ -n "$jdk" ] || die "no usable JDK $JDK_MIN-$JDK_MAX found — install one with:
+  brew install openjdk@21"
+
+    info "building $task with JDK $(java_major "$jdk")"
+    ( cd "$ROOT" && JAVA_HOME="$jdk" ./gradlew "$task" ) || die "gradle build failed"
+    [ -f "$ROOT/$apk" ] || die "build reported success but $apk is missing"
+    BUILT_APK="$apk"
+    return 0
+}
+
+install_apk() {
+    local apk="$1" serial="$2" out
+    info "installing $(basename "$apk") -> $serial"
+
+    out="$(adb -s "$serial" install -r -t "$ROOT/$apk" 2>&1)"
+    printf '%s\n' "$out" | sed 's/^/      /'
+
+    if printf '%s' "$out" | grep -q "Success"; then
+        ok "installed"
+        return 0
+    fi
+
+    # Signature/version conflicts are the common local-dev case: a build signed
+    # with a different key is already present. Retry once with -d after removing
+    # it, but only when the failure is specifically that conflict.
+    if printf '%s' "$out" | grep -q "INSTALL_FAILED_UPDATE_INCOMPATIBLE"; then
+        warn "an existing build with a different signature is installed"
+        info "uninstalling the old build and retrying (app data will be lost)"
+        adb -s "$serial" uninstall "$APP_ID" >/dev/null 2>&1 || true
+        out="$(adb -s "$serial" install -r -t "$ROOT/$apk" 2>&1)"
+        printf '%s\n' "$out" | sed 's/^/      /'
+        if printf '%s' "$out" | grep -q "Success"; then
+            ok "installed (after replacing the previous build)"
+            return 0
+        fi
+    fi
+
+    die "install failed on $serial (see adb output above)"
+}
+
+cmd_install() {
+    local variant="debug" no_build=0 a
+    for a in "$@"; do
+        case "$a" in
+            --release) variant="release" ;;
+            --no-build) no_build=1 ;;
+        esac
+    done
+
+    local serial
+    serial="$(resolve_serial)" || die "no single device to target.
+  connected: $(connected_devices | tr '\n' ' ')
+  pick one:   tools/adbw -s <serial> install
+  or connect a phone over Wi-Fi: tools/adbw connect"
+
+    local apk
+    case "$variant" in release) apk="$APK_RELEASE" ;; *) apk="$APK_DEBUG" ;; esac
+
+    if [ "$no_build" = "0" ]; then
+        build_apk "$variant" || exit 1
+        apk="$BUILT_APK"
+    else
+        [ -f "$ROOT/$apk" ] || die "$apk not built yet — drop --no-build"
+    fi
+
+    printf '\n'
+    install_apk "$apk" "$serial"
+}
+
+cmd_launch() {
+    local serial
+    serial="$(resolve_serial)" || die "no single device to target (use -s <serial>)"
+    adb -s "$serial" shell am start -W -n "$COMPONENT" 2>&1 | sed 's/^/  /'
+    ok "launched on $serial"
+}
+
+cmd_logs() {
+    local serial
+    serial="$(resolve_serial)" || die "no single device to target (use -s <serial>)"
+    [ "${1:-}" = "--clear" ] && { adb -s "$serial" logcat -c; ok "logcat cleared"; }
+
+    local pid
+    pid="$(adb -s "$serial" shell pidof "$APP_ID" 2>/dev/null | tr -d '\r')"
+    printf '\n'
+    if [ -n "$pid" ]; then
+        info "streaming logcat for $APP_ID (pid $pid) — Ctrl-C to stop"
+        printf '\n'
+        adb -s "$serial" logcat --pid="$pid"
+    else
+        warn "$APP_ID is not running — streaming filtered logcat for it"
+        hint "start it with: tools/adbw launch"
+        printf '\n'
+        adb -s "$serial" logcat | grep --line-buffered -i "veritransit\|$APP_ID"
+    fi
+}
+
+cmd_reverse() {
+    local serial
+    serial="$(resolve_serial)" || die "no single device to target (use -s <serial>)"
+    local arg="${1:-}"
+
+    case "$arg" in
+        "") adb -s "$serial" reverse --list 2>&1 | sed 's/^/  /'; return 0 ;;
+        --list) adb -s "$serial" reverse --list 2>&1 | sed 's/^/  /'; return 0 ;;
+        --remove-all) adb -s "$serial" reverse --remove-all; ok "all reverse tunnels removed"; return 0 ;;
+    esac
+
+    local local_port remote_port
+    case "$arg" in
+        *:*) local_port="${arg%%:*}"; remote_port="${arg##*:}" ;;
+        *)   local_port="$arg"; remote_port="$arg" ;;
+    esac
+
+    adb -s "$serial" reverse "tcp:$local_port" "tcp:$remote_port" >/dev/null 2>&1 \
+        || die "failed to create reverse tunnel tcp:$local_port -> tcp:$remote_port"
+    ok "reverse tcp:$local_port -> device tcp:$remote_port"
+    hint "device now reaches this Mac at 127.0.0.1:$local_port"
+}
+
+cmd_shell() {
+    local serial
+    serial="$(resolve_serial)" || die "no single device to target (use -s <serial>)"
+    [ "$#" -gt 0 ] || die "usage: tools/adbw shell <command...>"
+    adb -s "$serial" shell "$@"
+}
+
+cmd_deploy() {
+    local variant="debug" do_build=1 do_logcat=0 a
+    for a in "$@"; do
+        case "$a" in
+            --release) variant="release" ;;
+            --no-build) do_build=0 ;;
+            --logcat) do_logcat=1 ;;
+        esac
+    done
+
+    # Convenience: if nothing is connected but a phone was paired before, dial it.
+    if [ -z "$(connected_devices)" ]; then
+        local saved
+        saved="$(state_load)"
+        if [ -n "$saved" ]; then
+            info "no device connected — trying saved address $saved"
+            cmd_connect "$saved" || true
+        fi
+    fi
+
+    local serial
+    serial="$(resolve_serial)" || die "no device to deploy to.
+  connected devices: $(connected_devices | tr '\n' ' ')
+
+  a physical phone over Wi-Fi:
+  1. on the phone: Developer options -> Wireless debugging -> ON
+  2. tools/adbw pair        (first time only)
+  3. tools/adbw connect
+
+  an emulator or USB device, when several are attached:
+     tools/adbw -s <serial> deploy --no-build"
+
+    head_ "deploy -> $serial"
+
+    local apk
+    case "$variant" in release) apk="$APK_RELEASE" ;; *) apk="$APK_DEBUG" ;; esac
+    if [ "$do_build" = "1" ]; then
+        build_apk "$variant" || exit 1
+        apk="$BUILT_APK"
+    else
+        [ -f "$ROOT/$apk" ] || die "$apk not built yet — drop --no-build"
+    fi
+
+    install_apk "$apk" "$serial"
+
+    printf '\n'
+    adb -s "$serial" shell am start -W -n "$COMPONENT" 2>&1 | sed 's/^/  /'
+    ok "launched $APP_ID"
+
+    if [ "$do_logcat" = "1" ]; then
+        sleep 1
+        cmd_logs
+    else
+        printf '\n'
+        hint "logs:  tools/adbw logs"
+        hint "shell: tools/adbw shell getprop ro.build.version.release"
+        printf '\n'
+    fi
+}
+
+usage() {
+    cat <<EOF
+
+${C_B}adbw${C_OFF} — cable-free (wireless) ADB for VeriTransit
+
+${C_B}usage${C_OFF}
+  tools/adbw <command> [options]
+
+${C_B}setup (first time, no cable needed)${C_OFF}
+  On the phone: Settings -> About phone -> tap "Build number" 7x
+                Settings -> System -> Developer options -> Wireless debugging -> ON
+                "Pair device with pairing code"
+
+${C_B}commands${C_OFF}
+  doctor                 preflight: adb, mDNS, JDK, artifacts, network, devices
+  pair [CODE] [HOST:PORT] pair (auto-discovers the pairing port, or use the dialog's IP:Port)
+  connect [HOST:PORT]    connect on the persistent debugging port
+  disconnect [ADDR|--all] drop the wireless connection
+  status                 connected devices + advertised services
+  deploy                 build -> install -> launch
+  install                build + install only
+  launch                 start the app on the device
+  logs [--clear]         stream app logcat
+  reverse [L[:R]]        list/create reverse tunnels (--remove-all to clear)
+  shell <cmd...>         run a shell command on the device
+  probe HOST:PORT        TCP reachability test (diagnoses network isolation)
+
+${C_B}options${C_OFF}
+  -s, --serial SERIAL    target a specific device
+  --wireless             only consider wireless (ip:port) devices
+  --release              use the release build (install, deploy)
+  --no-build             skip the gradle build (install, deploy)
+  --logcat               tail logs after deploy
+  -h, --help             this help
+
+${C_B}examples${C_OFF}
+  tools/adbw doctor
+  tools/adbw pair 123456
+  tools/adbw deploy --logcat
+  tools/adbw -s 172.26.252.30:37099 logs
+
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# dispatch
+# ---------------------------------------------------------------------------
+
+main() {
+    require_adb
+
+    # Single pass over argv: extract global options (-s/--serial, --wireless)
+    # and keep everything else for the subcommand. Doing this in one pass avoids
+    # the positional-parameter corruption that shifting inside a for-loop causes.
+    WIRELESS_ONLY="${WIRELESS_ONLY:-0}"
+    local -a clean=()
+    local expect_serial=0 a
+    for a in "$@"; do
+        if [ "$expect_serial" = "1" ]; then
+            ADBW_SERIAL="$a"
+            expect_serial=0
+            continue
+        fi
+        case "$a" in
+            -s|--serial) expect_serial=1 ;;
+            --wireless)  WIRELESS_ONLY=1 ;;
+            *)           clean+=("$a") ;;
+        esac
+    done
+    [ "$expect_serial" = "0" ] || die "-s/--serial requires a SERIAL argument"
+
+    set -- ${clean[@]+"${clean[@]}"}
+
+    local cmd="${1:-help}"
+    [ "$#" -gt 0 ] && shift
+
+    case "$cmd" in
+        doctor)                 cmd_doctor "$@" ;;
+        pair)                   cmd_pair "$@" ;;
+        connect)                cmd_connect "$@" ;;
+        disconnect)             cmd_disconnect "$@" ;;
+        status|devices)         cmd_status "$@" ;;
+        deploy)                 cmd_deploy "$@" ;;
+        install)                cmd_install "$@" ;;
+        launch)                 cmd_launch "$@" ;;
+        logs|logcat)            cmd_logs "$@" ;;
+        reverse)                cmd_reverse "$@" ;;
+        shell)                  cmd_shell "$@" ;;
+        probe)                  cmd_probe "$@" ;;
+        help|-h|--help)         usage ;;
+        *) printf '\n%serror:%s unknown command: %s\n' "$C_NO" "$C_OFF" "$cmd" >&2; usage; exit 1 ;;
+    esac
+}
+
+main "$@"

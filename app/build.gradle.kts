@@ -18,8 +18,8 @@ val localProperties = Properties().apply {
     if (file.exists()) file.inputStream().use { load(it) }
 }
 
-fun buildConfigString(name: String): String =
-    (localProperties.getProperty(name) ?: "")
+fun buildConfigString(name: String, default: String = ""): String =
+    (localProperties.getProperty(name) ?: default)
         .replace("\\", "\\\\")
         .replace("\"", "\\\"")
 
@@ -39,6 +39,10 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // OpenRouter cloud fallback; a missing key just disables the cloud leg.
         buildConfigField("String", "OPENROUTER_API_KEY", "\"${buildConfigString("openrouter.api.key")}\"")
+        // Back-office web dashboard (the :dashboard module). With
+        // `adb reverse tcp:8080 tcp:8080`, 127.0.0.1:8080 on the handset
+        // reaches a dashboard running on the host machine.
+        buildConfigField("String", "DASHBOARD_URL", "\"${buildConfigString("dashboard.url", default = "http://127.0.0.1:8080")}\"")
         ndk {
             // Snapdragon only — the GenieX AAR ships ~80 MB of arm64 QNN libs and
             // nothing else; packaging other ABIs just bloats the APK.
@@ -114,6 +118,11 @@ dependencies {
     implementation("androidx.camera:camera-camera2:1.4.2")
     implementation("androidx.camera:camera-lifecycle:1.4.2")
     implementation("androidx.camera:camera-view:1.4.2")
+
+    // QR / barcode decoding for the bill scanner. The bundled variant carries
+    // its own model, so detection works with the radio off — same constraint
+    // as the rest of the field pipeline.
+    implementation("com.google.mlkit:barcode-scanning:17.3.0")
 
     // JVM-side unit tests for the pure logic (reconciliation mapping, status
     // derivation, bill-reading confidence parsing) — these run in CI without

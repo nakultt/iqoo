@@ -10,6 +10,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -53,6 +55,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.TextStyle
@@ -111,7 +115,7 @@ fun ResultScreen(
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Banner(record)
                 ReconciliationCard(record)
-                EvidenceSection(record, onZoom = { showZoom = true })
+                EvidenceSection(record, evidencePath = flow?.cargoEvidence, onZoom = { showZoom = true })
 
                 if (record.verdict != Verdict.PENDING && (active || record.flagged)) {
                     ActionCard(record, active, action, onAction = {
@@ -176,11 +180,16 @@ fun ResultScreen(
                     .background(Color(0xFF0C131C))
                     .padding(10.dp),
             ) {
-                EvidenceCanvas(
-                    Modifier.fillMaxWidth().height(320.dp),
-                    boxes = evidenceBoxes(record),
-                    timestamp = "14:22:09 · GPS Verified · Bay Rig #3",
-                )
+                val captured = flow?.cargoEvidence
+                if (captured != null) {
+                    EvidencePhoto(captured, Modifier.fillMaxWidth().height(320.dp))
+                } else {
+                    EvidenceCanvas(
+                        Modifier.fillMaxWidth().height(320.dp),
+                        boxes = evidenceBoxes(record),
+                        timestamp = evidenceTimestamp(record),
+                    )
+                }
                 Spacer(Modifier.height(8.dp))
                 Text(
                     "Evidence frame · tap outside to close",
@@ -351,8 +360,19 @@ private fun MatchBadge() {
     }
 }
 
-private fun evidenceBoxes(record: InspectionRecord): List<Bounds> {
-    val boxes = mutableListOf(
+/**
+ * Caption for the vector illustration shown when no captured photo exists.
+ * The clock time comes from the record itself — no fixed sample string.
+ */
+private fun evidenceTimestamp(record: InspectionRecord): String {
+    val time = runCatching {
+        java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
+            .format(java.util.Date(record.timestamp))
+    }.getOrNull() ?: "--:--:--"
+    return "$time · GPS Verified"
+}
+
+private fun evidenceBoxes(record: InspectionRecord): List<Bounds> {    val boxes = mutableListOf(
         Bounds(0.05f, 0.28f, 0.22f, 0.34f, Color(0xFF34D399), "OK"),
     )
     record.items.forEach { item ->
@@ -367,17 +387,46 @@ private fun evidenceBoxes(record: InspectionRecord): List<Bounds> {
 }
 
 @Composable
-private fun EvidenceSection(record: InspectionRecord, onZoom: () -> Unit) {
+private fun EvidencePhoto(path: String, modifier: Modifier = Modifier) {
+    val bitmap = remember(path) {
+        runCatching { BitmapFactory.decodeFile(path) }.getOrNull()
+    }
+    if (bitmap != null) {
+        Image(
+            bitmap = bitmap.asImageBitmap(),
+            contentDescription = "Evidence photo captured this inspection",
+            contentScale = ContentScale.Crop,
+            modifier = modifier.clip(RoundedCornerShape(8.dp)),
+        )
+    } else {
+        Box(modifier.clip(RoundedCornerShape(8.dp)).background(Color(0xFF141A22)))
+    }
+}
+
+@Composable
+private fun EvidenceSection(record: InspectionRecord, evidencePath: String?, onZoom: () -> Unit) {
     Column {
         SectionLabel(
             "Evidence Scan",
             trailing = {
-                Text("Bay Rig #3", style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Medium, fontSize = 11.sp), color = VT.Muted)
+                Text(
+                    if (evidencePath != null) "This inspection" else "Illustration",
+                    style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Medium, fontSize = 11.sp),
+                    color = VT.Muted,
+                )
             },
         )
         Spacer(Modifier.height(10.dp))
         Box(Modifier.clickable(onClick = onZoom)) {
-            EvidenceCanvas(Modifier.fillMaxWidth().height(215.dp), boxes = evidenceBoxes(record))
+            if (evidencePath != null) {
+                EvidencePhoto(evidencePath, Modifier.fillMaxWidth().height(215.dp))
+            } else {
+                EvidenceCanvas(
+                    Modifier.fillMaxWidth().height(215.dp),
+                    boxes = evidenceBoxes(record),
+                    timestamp = evidenceTimestamp(record),
+                )
+            }
             Box(
                 Modifier
                     .align(Alignment.BottomEnd)
