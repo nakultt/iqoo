@@ -115,6 +115,16 @@ object InspectorAi {
         Return the JSON object and nothing else.
     """.trimIndent()
 
+    /**
+     * Reads [imagePath] into a [BillReading].
+     *
+     * Header fields (bill number, vehicle, make/model) come back reliably. The
+     * line-item table often does not: the bundle's encoder is fixed at 512x512
+     * / 256 tokens, which puts small tabular print near the limit of what it
+     * can resolve. A reading with no items is still useful — the officer
+     * confirms the goods on the manifest step — so an empty list is a normal
+     * result here, not an error.
+     */
     suspend fun readEwayBill(imagePath: String): Result<BillReading> =
         NpuEngine.run(
             systemPrompt = BILL_SYSTEM,

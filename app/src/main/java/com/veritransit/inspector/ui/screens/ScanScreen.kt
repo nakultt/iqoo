@@ -243,7 +243,9 @@ private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedba
         readError = null
         scope.launch {
             try {
-                val frame = camera.capture(context)
+                // A bill is a document: fit the whole page in rather than
+                // centre-cropping the goods table off the bottom.
+                val frame = camera.capture(context, EvidenceCamera.Fit.CONTAIN)
                 if (frame == null) {
                     readError = camera.error ?: "Camera could not take the shot."
                     return@launch

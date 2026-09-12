@@ -83,11 +83,20 @@ object NpuEngine {
     private const val RUNTIME_QAIRT = "qairt"
 
     /**
-     * Square edge the evidence photo is cropped to before it reaches the vision
-     * tower. The AI Hub bundle carries its own encoder rather than a GGUF
-     * mmproj, so there is no header to read the trained resolution out of.
+     * Square edge the evidence photo is resized to before it reaches the vision
+     * tower.
+     *
+     * Taken from the bundle's own `img-enc-htp.json`, which declares
+     * `vision-param: {height: 32, width: 32}` — a 32x32 grid of Qwen3-VL's
+     * 16 px patches, so 512 px. `metadata.json` corroborates it: the encoder
+     * takes 1024 patches (32x32) and emits 256 image tokens after the 2x2
+     * spatial merge. Handing it anything smaller throws away detail for no
+     * saving, since the cost is fixed at 256 tokens either way.
      */
-    const val VISION_INPUT_PX = 448
+    const val VISION_INPUT_PX = 512
+
+    /** What one photograph costs against [CONTEXT_TOKENS], from the same file. */
+    const val VISION_TOKENS = 256
 
     /**
      * Context the bundle was compiled with, from its own `genie_config.json`

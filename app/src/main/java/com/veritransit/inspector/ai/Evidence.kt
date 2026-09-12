@@ -3,6 +3,8 @@ package com.veritransit.inspector.ai
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.Matrix
 import android.media.ExifInterface
 import android.util.Log
@@ -59,10 +61,12 @@ class EvidenceCamera {
     }
 
     /**
-     * Takes a frame and returns it cropped square and upright, sized for the
-     * vision tower. Returns null if the camera is not bound or the shot fails.
+     * Takes a frame and returns it square and upright, sized for the vision
+     * tower. [fit] chooses how a non-square frame is made square — see
+     * [squareFit] and [squareCrop]. Returns null if the camera is not bound or
+     * the shot fails.
      */
-    suspend fun capture(context: Context): File? {
+    suspend fun capture(context: Context, fit: Fit = Fit.COVER): File? {
         val capture = imageCapture ?: return null
         val raw = File(context.cacheDir, "evidence_raw_${System.currentTimeMillis()}.jpg")
         val saved = suspendCancellableCoroutine { cont ->
@@ -85,11 +89,25 @@ class EvidenceCamera {
         if (!saved) return null
         return withContext(Dispatchers.IO) {
             val out = File(context.cacheDir, "evidence_${System.currentTimeMillis()}.jpg")
-            runCatching { squareCrop(raw, out, NpuEngine.VISION_INPUT_PX) }
-                .onFailure { Log.e(TAG, "crop failed", it) }
+            runCatching {
+                when (fit) {
+                    Fit.COVER -> squareCrop(raw, out, NpuEngine.VISION_INPUT_PX)
+                    Fit.CONTAIN -> squareFit(raw, out, NpuEngine.VISION_INPUT_PX)
+                }
+            }
+                .onFailure { Log.e(TAG, "resize failed", it) }
                 .also { raw.delete() }
                 .getOrNull()
         }
+    }
+
+    /** How a non-square frame is squared off for the encoder. */
+    enum class Fit {
+        /** Fill the square, trimming the long edge. For scenes. */
+        COVER,
+
+        /** Fit the whole frame inside the square. For documents. */
+        CONTAIN,
     }
 }
 
@@ -153,23 +171,24 @@ fun EvidenceViewfinder(camera: EvidenceCamera, modifier: Modifier = Modifier) {
 
 /**
  * Rotates [source] upright per its EXIF tag, scales its shorter edge to [size],
- * then centre-crops a [size]×[size] square into [out].
+ * then centre-crops a [size]x[size] square into [out].
  *
- * Filling the square edge to edge is deliberate. Padding a non-square photo
- * onto a blank canvas leaves letterbox bars, and the encoder tokenises the
- * whole square as a fixed grid — so the bars would burn image tokens on black
- * pixels and shrink the subject, which is exactly the detail an E-Way Bill
- * number needs. Cropping the edges of a wide frame keeps full resolution on the
- * centre, the standard preprocessing for CLIP-style towers.
+ * Filling the square edge to edge keeps full resolution on the middle of the
+ * frame, which is what a photograph of a cargo bay wants — the subject is in
+ * the centre and the edges are bay wall. Use [squareFit] for anything where
+ * losing the edges loses content.
  */
-internal fun squareCrop(source: File, out: File, size: Int): File {
+/**
+ * Decodes [source], downsampling during decode but never below [size] on the
+ * shorter edge, and rotates it upright per its EXIF tag. Returns null if the
+ * file will not decode.
+ */
+private fun decodeUpright(source: File, size: Int): Bitmap? {
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     BitmapFactory.decodeFile(source.absolutePath, bounds)
 
     val opts = BitmapFactory.Options().apply {
         inPreferredConfig = Bitmap.Config.ARGB_8888
-        // Downsample during decode, but never below the target on the shorter
-        // edge — the scale below must not have to upscale.
         inSampleSize = run {
             val shorter = minOf(bounds.outWidth, bounds.outHeight)
             var s = 1
@@ -177,7 +196,7 @@ internal fun squareCrop(source: File, out: File, size: Int): File {
             s
         }
     }
-    var bmp = BitmapFactory.decodeFile(source.absolutePath, opts) ?: error("decode failed")
+    var bmp = BitmapFactory.decodeFile(source.absolutePath, opts) ?: return null
 
     val orientation = runCatching {
         ExifInterface(source.absolutePath)
@@ -199,6 +218,42 @@ internal fun squareCrop(source: File, out: File, size: Int): File {
             bmp = rotated
         }
     }
+    return bmp
+}
+
+/**
+ * Rotates [source] upright and fits the whole frame inside a [size]x[size]
+ * square on white, padding the short axis.
+ *
+ * This is the right shape for documents and the wrong one for scenes. A
+ * portrait photo of an A4 bill is about 3:4, so a centre-crop would take a
+ * quarter of the page off — and the part it takes is the goods table at the
+ * bottom. Padding costs some of the fixed 256 image tokens, but losing the
+ * table costs the whole reading. White, not black, because that is what the
+ * paper around the print already is.
+ */
+internal fun squareFit(source: File, out: File, size: Int): File {
+    val bmp = decodeUpright(source, size) ?: error("decode failed")
+    val scale = size.toFloat() / maxOf(bmp.width, bmp.height)
+    val w = (bmp.width * scale).toInt().coerceAtLeast(1)
+    val h = (bmp.height * scale).toInt().coerceAtLeast(1)
+    val scaled = if (bmp.width != w || bmp.height != h) Bitmap.createScaledBitmap(bmp, w, h, true) else bmp
+    if (scaled !== bmp) bmp.recycle()
+
+    val canvasBmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    Canvas(canvasBmp).apply {
+        drawColor(Color.WHITE)
+        drawBitmap(scaled, ((size - w) / 2).toFloat(), ((size - h) / 2).toFloat(), null)
+    }
+    if (!scaled.isRecycled) scaled.recycle()
+
+    FileOutputStream(out).use { canvasBmp.compress(Bitmap.CompressFormat.JPEG, 95, it) }
+    canvasBmp.recycle()
+    return out
+}
+
+internal fun squareCrop(source: File, out: File, size: Int): File {
+    val bmp = decodeUpright(source, size) ?: error("decode failed")
 
     val scale = size.toFloat() / minOf(bmp.width, bmp.height)
     val w = ceil(bmp.width * scale).toInt().coerceAtLeast(size)
