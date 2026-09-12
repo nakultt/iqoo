@@ -23,11 +23,13 @@ data class ChatTurn(
 
 /**
  * A free-form conversation with the on-device model, kept inside the bundle's
- * fixed context window.
+ * context window.
  *
  * The whole transcript is re-sent on every turn, so it has to be trimmed here —
- * there is no server-side session to lean on, and overflowing a 2048-token
- * context does not degrade gracefully, it fails the generate call.
+ * there is no server-side session to lean on, and overflowing the window does
+ * not degrade gracefully, it fails the generate call. The trim budget tracks
+ * [NpuEngine.effectiveContextTokens], and sliding-window attention stays armed
+ * underneath as a second net.
  */
 @Stable
 class ChatSession {
@@ -143,7 +145,7 @@ class ChatSession {
     private fun buildHistory(): List<VlmChatMessage> {
         val system = VlmChatMessage("system", listOf(VlmContent("text", SYSTEM_PROMPT)))
         val kept = ArrayDeque<ChatTurn>()
-        var budget = CONTEXT_BUDGET - estimatorDrift()
+        var budget = contextBudget() - estimatorDrift()
 
         // Walk backwards so the newest turns are the ones that survive.
         for (turn in turns.reversed()) {
@@ -174,10 +176,11 @@ class ChatSession {
      * means prompts really cost more than estimated, so the budget shrinks.
      * Zero until the first generation completes.
      */
-    private fun estimatorDrift(): Int =
-        if (measuredPromptTokens > 0L) (measuredPromptTokens - predictedPromptTokens)
-            .coerceIn(-CONTEXT_BUDGET.toLong(), CONTEXT_BUDGET.toLong()).toInt()
-        else 0
+    private fun estimatorDrift(): Int {
+        if (measuredPromptTokens <= 0L) return 0
+        val cap = contextBudget().toLong()
+        return (measuredPromptTokens - predictedPromptTokens).coerceIn(-cap, cap).toInt()
+    }
 
     private companion object {
         const val TAG = "ChatSession"
@@ -188,7 +191,8 @@ class ChatSession {
                 "image, describe only what is actually in it."
 
         /** Tokens of the window left for the prompt, so a reply always fits. */
-        val CONTEXT_BUDGET = NpuEngine.CONTEXT_TOKENS - REPLY_TOKENS - 128
+        fun contextBudget(): Int =
+            BundleContext.promptBudget(NpuEngine.effectiveContextTokens, REPLY_TOKENS)
 
         const val REPLY_TOKENS = 512
 

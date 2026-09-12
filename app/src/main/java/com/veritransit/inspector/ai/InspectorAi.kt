@@ -17,9 +17,9 @@ import kotlinx.serialization.json.Json
  * brace, and a malformed reply must degrade to "AI unavailable" rather than
  * crash an officer's inspection mid-shift.
  *
- * Token budgets are sized against [NpuEngine.CONTEXT_TOKENS], not the 4096 the
- * model supports off-device: the AI Hub bundle is compiled to a 2048 context,
- * and an evidence photo already spends ~256 of it.
+ * Token budgets are sized against [NpuEngine.effectiveContextTokens], not the
+ * 4096 the model supports off-device: the AI Hub bundle is compiled to a 2048
+ * context, and an evidence photo already spends ~256 of it.
  */
 object InspectorAi {
 
