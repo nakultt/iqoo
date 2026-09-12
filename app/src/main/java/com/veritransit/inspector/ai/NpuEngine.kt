@@ -494,7 +494,53 @@ object NpuEngine {
             status = Status.BUSY
             activity = label
             try {
-                withContext(Dispatchers.IO) { generate(wrapper, systemPrompt, userPrompt, imagePaths, maxTokens, temperature, onToken) }
+                val userTurn = VlmChatMessage(
+                    role = "user",
+                    contents = buildList {
+                        imagePaths.forEach { add(VlmContent("image", it)) }
+                        add(VlmContent("text", userPrompt))
+                    },
+                )
+                val turns = buildList {
+                    if (systemPrompt.isNotBlank()) {
+                        add(VlmChatMessage("system", listOf(VlmContent("text", systemPrompt))))
+                    }
+                    add(userTurn)
+                }
+                withContext(Dispatchers.IO) {
+                    generate(wrapper, turns, userTurn, maxTokens, temperature, onToken)
+                }
+            } finally {
+                activity = null
+                if (status == Status.BUSY) status = Status.READY
+            }
+        }
+    }
+
+    /**
+     * Multi-turn conversation. [turns] is the whole exchange including the new
+     * user message; the caller owns the history and is responsible for keeping
+     * it inside [CONTEXT_TOKENS].
+     *
+     * [mediaTurn] is the single turn whose images are handed to the encoder —
+     * normally the latest. The SDK tokenises media incrementally, so replaying
+     * earlier turns' images desyncs the image markers against the bitmaps.
+     */
+    suspend fun converse(
+        turns: List<VlmChatMessage>,
+        mediaTurn: VlmChatMessage,
+        maxTokens: Int = 512,
+        temperature: Float = 0.7f,
+        onToken: (String) -> Unit = {},
+    ): Result<String> {
+        val wrapper = vlm ?: return Result.failure(IllegalStateException("Model not loaded"))
+        return inferenceLock.withLock {
+            status = Status.BUSY
+            activity = "Thinking"
+            try {
+                withContext(Dispatchers.IO) {
+                    generate(wrapper, turns, mediaTurn, maxTokens, temperature, onToken)
+                }
             } finally {
                 activity = null
                 if (status == Status.BUSY) status = Status.READY
@@ -504,39 +550,24 @@ object NpuEngine {
 
     private suspend fun generate(
         wrapper: VlmWrapper,
-        systemPrompt: String,
-        userPrompt: String,
-        imagePaths: List<String>,
+        turns: List<VlmChatMessage>,
+        mediaTurn: VlmChatMessage,
         maxTokens: Int,
         temperature: Float,
         onToken: (String) -> Unit,
     ): Result<String> {
+        // The whole exchange is re-sent every call, so the session is cleared
+        // first; otherwise the runtime would prepend its own copy of it.
         runCatching { wrapper.reset() }
 
-        val userTurn = VlmChatMessage(
-            role = "user",
-            contents = buildList {
-                imagePaths.forEach { add(VlmContent("image", it)) }
-                add(VlmContent("text", userPrompt))
-            },
-        )
-        val turns = buildList {
-            if (systemPrompt.isNotBlank()) {
-                add(VlmChatMessage("system", listOf(VlmContent("text", systemPrompt))))
-            }
-            add(userTurn)
-        }.toTypedArray()
-
-        val templated = wrapper.applyChatTemplate(turns, null, false)
+        val templated = wrapper.applyChatTemplate(turns.toTypedArray(), null, false)
             .getOrElse { return Result.failure(it) }
 
         val base = GenerationConfig(
             maxTokens = maxTokens,
             samplerConfig = SamplerConfig(temperature = temperature, topP = 0.9f, topK = 20),
         )
-        // Only the current turn's media: the SDK tokenises incrementally, so
-        // re-passing earlier bitmaps desyncs the image markers.
-        val config = wrapper.injectMediaPathsToConfig(arrayOf(userTurn), base)
+        val config = wrapper.injectMediaPathsToConfig(arrayOf(mediaTurn), base)
 
         val sb = StringBuilder()
         var failure: Throwable? = null

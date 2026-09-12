@@ -22,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.CloudDownload
 import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Forum
 import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material3.Icon
@@ -58,7 +59,7 @@ import java.util.Locale
  * NPU, and show what the last inference actually cost.
  */
 @Composable
-fun NpuScreen(onBack: () -> Unit, onToast: (String) -> Unit) {
+fun NpuScreen(onBack: () -> Unit, onToast: (String) -> Unit, onOpenChat: () -> Unit) {
     val context = LocalContext.current
     val status = NpuEngine.status
 
@@ -219,6 +220,15 @@ fun NpuScreen(onBack: () -> Unit, onToast: (String) -> Unit) {
                         SpecRow("Prompt / generated", "${p.promptTokens} / ${p.generatedTokens}")
                     }
                 }
+            }
+
+            if (NpuEngine.isReady) {
+                SecondaryButton(
+                    "Chat with the model",
+                    onOpenChat,
+                    icon = Icons.Rounded.Forum,
+                    modifier = Modifier.fillMaxWidth(),
+                )
             }
 
             SectionLabel("How it is used")

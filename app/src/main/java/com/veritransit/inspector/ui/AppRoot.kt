@@ -62,6 +62,7 @@ import com.veritransit.inspector.ui.components.ToastBar
 import com.veritransit.inspector.ui.screens.CargoScanScreen
 import com.veritransit.inspector.ui.screens.AppSettings
 import com.veritransit.inspector.ui.screens.HomeScreen
+import com.veritransit.inspector.ui.screens.ChatScreen
 import com.veritransit.inspector.ui.screens.ManifestScreen
 import com.veritransit.inspector.ui.screens.NpuScreen
 import com.veritransit.inspector.ui.screens.RecordsScreen
@@ -85,6 +86,7 @@ private sealed interface Page {
     data object ResultActive : Page
     data class ResultView(val recordId: String) : Page
     data object NpuModel : Page
+    data object Chat : Page
 }
 
 private sealed interface NavTarget {
@@ -100,6 +102,8 @@ fun AppRoot() {
     val stack = remember { mutableStateListOf<Page>() }
     val flow = remember { InspectionFlowState() }
     val settings = remember { AppSettings() }
+    // Survives navigation so the transcript is still there on the way back.
+    val chat = remember { com.veritransit.inspector.ai.ChatSession() }
     var toast by remember { mutableStateOf<String?>(null) }
     var startInManualFlag by remember { mutableStateOf(false) }
 
@@ -186,6 +190,11 @@ fun AppRoot() {
                         Page.NpuModel -> NpuScreen(
                             onBack = { stack.removeAt(stack.lastIndex) },
                             onToast = { feedback(it) },
+                            onOpenChat = { stack.add(Page.Chat) },
+                        )
+                        Page.Chat -> ChatScreen(
+                            session = chat,
+                            onBack = { stack.removeAt(stack.lastIndex) },
                         )
                         Page.ManifestStep -> ManifestScreen(
                             flow = flow,
