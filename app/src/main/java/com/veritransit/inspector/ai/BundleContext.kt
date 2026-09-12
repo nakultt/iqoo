@@ -62,6 +62,16 @@ object BundleContext {
         return size?.takeIf { it in MIN_CONTEXT_TOKENS..MAX_CONTEXT_TOKENS }
     }
 
+    /**
+     * The provenance decision behind `contextFromBundle`: a valid declaration
+     * is adopted and attributed to the bundle; anything unreadable reverts to
+     * the default assumption with the flag down — never the *previous*
+     * bundle's window, which the bundle now on disk no longer backs. Pure so
+     * the engine-side decision is pinned by JVM tests.
+     */
+    fun applyDeclaration(declared: Int?): Pair<Int, Boolean> =
+        if (declared != null) declared to true else DEFAULT_CONTEXT_TOKENS to false
+
     /** Prompt tokens usable when [replyTokens] must still fit the window. */
     fun promptBudget(contextTokens: Int, replyTokens: Int, margin: Int = PROMPT_MARGIN): Int =
         (contextTokens - replyTokens - margin).coerceAtLeast(MIN_PROMPT_BUDGET)
