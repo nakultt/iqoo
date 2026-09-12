@@ -121,6 +121,10 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:1.4.2")
     implementation("androidx.camera:camera-view:1.4.2")
 
+    // On-device QR generation for the sender flow — labels are rendered
+    // on the phone itself (ZXing core has no Android dependency).
+    implementation("com.google.zxing:core:3.5.3")
+
     // Instrumented checks for the NPU path — they need a real Hexagon, so they
     // only run on a device with the bundle already pulled.
     androidTestImplementation("androidx.test:runner:1.6.2")

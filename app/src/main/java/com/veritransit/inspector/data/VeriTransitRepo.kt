@@ -105,6 +105,46 @@ class VeriTransitRepo private constructor(
     suspend fun savePodDraft(draft: PodDraftEntity) = db.pod().save(draft)
     suspend fun podDraft(ref: String) = db.pod().draft(ref)
 
+    // ------------------------------------------------- mobile pack station
+    // Caches server-issued labels so the sender's QRs scan offline immediately
+    // (bootstrap would bring them anyway on next sync; this avoids the wait).
+
+    suspend fun cacheIssuedLabels(ref: String, labels: List<com.veritransit.core.IssuedLabel>) {
+        val now = System.currentTimeMillis()
+        db.shipments().byRef(ref) ?: db.shipments().upsert(
+            listOf(ShipmentEntity(ref, null, null, null, labels.size, "OPEN", null, null, null, null, null, null, now))
+        )
+        db.packages().upsert(labels.map { l ->
+            PackageEntity(
+                packageCode = l.packageCode, shipmentRef = ref,
+                kind = l.kind.name, parentCode = l.parentCode,
+                contents = l.contents, sku = null, qty = l.qty,
+                poLineNo = null, status = "PRINTED",
+                labelPayload = l.payload, copyNo = 1, localStatus = null,
+            )
+        })
+    }
+
+    suspend fun cacheLocalShipment(ref: String, supplier: String?, buyer: String?, count: Int) {
+        if (db.shipments().byRef(ref) == null) {
+            db.shipments().upsert(
+                listOf(ShipmentEntity(ref, null, null, null, count, "OPEN", supplier, buyer, null, null, null, null, System.currentTimeMillis()))
+            )
+        }
+    }
+
+    suspend fun cacheLocalPackages(ref: String, rows: List<PackageEntity>) {
+        db.packages().upsert(rows)
+    }
+
+    suspend fun saveDocumentFact(row: DocumentFactEntity) = db.documents().upsert(row)
+
+    fun observeDocuments(ref: String) = db.documents().observeForShipment(ref)
+    fun observePackages(ref: String) = db.packages().observeForShipment(ref)
+
+    suspend fun masterChildren(master: String) = db.packages().childrenOf(master)
+    suspend fun packageByCode(code: String) = db.packages().byCode(code)
+
     // ------------------------------------------------------------- sync
 
     private fun api(): ApiClient? {

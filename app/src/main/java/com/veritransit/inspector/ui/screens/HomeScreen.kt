@@ -56,6 +56,8 @@ fun HomeScreen(
     now: Long,
     onStartInspection: () -> Unit,
     onLookup: () -> Unit,
+    onSender: () -> Unit,
+    onReceiver: () -> Unit,
     onOpenRecord: (String) -> Unit,
     onOpenShiftLogs: () -> Unit,
 ) {
@@ -71,7 +73,24 @@ fun HomeScreen(
         Spacer(Modifier.height(18.dp))
         StatusCard(Modifier.padding(horizontal = 16.dp))
         Spacer(Modifier.height(18.dp))
+        // Two roles, one phone: sender packs + prints QRs, receiver opens +
+        // proves + signs. Gate/warehouse tabs below stay as-is.
         Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            SectionLabel("I am…")
+            RoleCard(
+                title = "Sender — pack & label",
+                sub = "Create shipment · 1 master + N inner QRs on this phone · paperwork photo",
+                onClick = onSender,
+            )
+            RoleCard(
+                title = "Receiver — verify & sign",
+                sub = "Scan big box → scan N inners → AI label check → sign PoD",
+                onClick = onReceiver,
+            )
+        }
+        Spacer(Modifier.height(20.dp))
+        Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            SectionLabel("Quick gate check")
             PrimaryButton("Start Inspection", onStartInspection, icon = Icons.Rounded.QrCodeScanner)
             SecondaryButton("Lookup E-Way Bill", onLookup, icon = Icons.Rounded.Search, modifier = Modifier.fillMaxWidth())
         }
@@ -191,6 +210,21 @@ private fun Stat(label: String, value: Int, color: Color, sub: String, modifier:
         Text("$value", style = MaterialTheme.typography.headlineLarge, color = color)
         Spacer(Modifier.height(4.dp))
         Text(sub, style = MaterialTheme.typography.bodySmall, color = VT.Muted)
+    }
+}
+
+@Composable
+private fun RoleCard(title: String, sub: String, onClick: () -> Unit) {
+    VTCard(modifier = Modifier.fillMaxWidth().clickable(onClick = onClick)) {
+        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleMedium, color = VT.Ink)
+                Spacer(Modifier.height(4.dp))
+                Text(sub, style = MaterialTheme.typography.bodySmall, color = VT.Muted)
+            }
+            Spacer(Modifier.width(8.dp))
+            Text("›", style = MaterialTheme.typography.headlineMedium, color = VT.Primary)
+        }
     }
 }
 

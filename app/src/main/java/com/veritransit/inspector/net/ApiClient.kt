@@ -3,10 +3,17 @@ package com.veritransit.inspector.net
 import com.veritransit.core.ActivateRequest
 import com.veritransit.core.ActivateResponse
 import com.veritransit.core.BootstrapResponse
+import com.veritransit.core.CloseMasterRequest
+import com.veritransit.core.CreateShipmentRequest
+import com.veritransit.core.IssueLabelsRequest
+import com.veritransit.core.IssueLabelsResponse
+import com.veritransit.core.IssuedLabel
 import com.veritransit.core.PodSubmission
 import com.veritransit.core.ScanBatchRequest
 import com.veritransit.core.ScanBatchResponse
 import com.veritransit.core.ScanEvent
+import com.veritransit.core.Shipment
+import com.veritransit.core.ShipmentDocument
 import com.veritransit.core.ShipmentReport
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
@@ -76,6 +83,43 @@ class ApiClient(
 
     suspend fun report(ref: String): ShipmentReport =
         client.get("$baseUrl/v1/shipments/$ref/report").body()
+
+    // ------------------------------------------------- mobile pack station
+    // The sender flow on the phone (replaces the web pack-station page).
+    // Every call degrades to the offline draft path on failure — the caller
+    // decides, so these throw and the ViewModel falls back to local QRs.
+
+    suspend fun shipments(): List<Shipment> =
+        client.get("$baseUrl/v1/shipments").body()
+
+    suspend fun createShipment(req: CreateShipmentRequest): Shipment =
+        client.post("$baseUrl/v1/shipments") {
+            contentType(ContentType.Application.Json)
+            setBody(req)
+        }.body()
+
+    /** Bulk issue: N masters x M inners, signed server-side, rows before print. */
+    suspend fun issueLabels(ref: String, req: IssueLabelsRequest): IssueLabelsResponse =
+        client.post("$baseUrl/v1/shipments/$ref/labels:batch") {
+            contentType(ContentType.Application.Json)
+            setBody(req)
+        }.body()
+
+    /** Close a master over the inner codes actually scanned into the carton. */
+    suspend fun closeMaster(req: CloseMasterRequest): IssuedLabel =
+        client.post("$baseUrl/v1/packages:close-master") {
+            contentType(ContentType.Application.Json)
+            setBody(req)
+        }.body()
+
+    suspend fun attachDocument(ref: String, doc: ShipmentDocument): ShipmentDocument =
+        client.post("$baseUrl/v1/shipments/$ref/documents") {
+            contentType(ContentType.Application.Json)
+            setBody(doc)
+        }.body()
+
+    suspend fun documents(ref: String): List<ShipmentDocument> =
+        client.get("$baseUrl/v1/shipments/$ref/documents").body()
 
     suspend fun submitPod(submission: PodSubmission): String =
         client.post("$baseUrl/v1/shipments/${submission.shipmentRef}/pod") {

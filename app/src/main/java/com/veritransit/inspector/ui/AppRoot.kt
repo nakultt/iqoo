@@ -94,6 +94,12 @@ private sealed interface Page {
     data class WarehouseScan(val ref: String, val receiving: Boolean) : Page
     data class WarehouseRecon(val ref: String) : Page
     data object DeviceSetup : Page
+    // Sender = phone pack-station (master + N inner QRs, on-device rendering).
+    // Receiver = guided unboxing (master → N inners → VLM check → PoD).
+    // Gate + Warehouse tabs stay untouched below.
+    data object Sender : Page
+    data object Receiver : Page
+    data class AiCheck(val code: String) : Page
     data object ManifestStep : Page
     data object CargoScan : Page
     data object ResultActive : Page
@@ -121,6 +127,7 @@ fun AppRoot() {
     var startInManualFlag by remember { mutableStateOf(false) }
 
     val warehouse: WarehouseViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
+    val sender: com.veritransit.inspector.ui.sender.SenderViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
 
     val tone = remember { ToneGenerator(AudioManager.STREAM_NOTIFICATION, 72) }
     DisposableEffect(Unit) { onDispose { tone.release() } }
@@ -177,6 +184,8 @@ fun AppRoot() {
                                 startInManualFlag = true
                                 gotoTab(Tab.SCAN)
                             },
+                            onSender = { stack.add(Page.Sender) },
+                            onReceiver = { stack.add(Page.Receiver) },
                             onOpenRecord = { id -> stack.add(Page.ResultView(id)) },
                             onOpenShiftLogs = { gotoTab(Tab.RECORDS) },
                         )
@@ -213,8 +222,34 @@ fun AppRoot() {
                                    else com.veritransit.core.ScanKind.LOAD,
                             onDone = {
                                 stack.removeAt(stack.lastIndex)
-                                stack.add(Page.WarehouseRecon(page.ref))
+                                // Receiver returns to its guided checklist; loader to reconciliation.
+                                if (!page.receiving) stack.add(Page.WarehouseRecon(page.ref))
                             },
+                            onAiCheck = { code -> stack.add(Page.AiCheck(code)) },
+                        )
+                        Page.Sender -> com.veritransit.inspector.ui.sender.SenderFlowScreen(
+                            vm = sender,
+                            onBack = { stack.removeAt(stack.lastIndex) },
+                        )
+                        Page.Receiver -> com.veritransit.inspector.ui.receiver.ReceiverFlowScreen(
+                            vm = warehouse,
+                            onScanMaster = {
+                                warehouse.selected.value?.let { ref ->
+                                    stack.add(Page.WarehouseScan(ref, receiving = true))
+                                } ?: feedback("Pick a shipment first")
+                            },
+                            onScanInner = {
+                                warehouse.selected.value?.let { ref ->
+                                    stack.add(Page.WarehouseScan(ref, receiving = true))
+                                } ?: feedback("Pick a shipment first")
+                            },
+                            onAiCheck = { code -> stack.add(Page.AiCheck(code)) },
+                            onBack = { stack.removeAt(stack.lastIndex) },
+                        )
+                        is Page.AiCheck -> com.veritransit.inspector.ui.receiver.AiVisualCheckScreen(
+                            vm = warehouse,
+                            packageCode = page.code,
+                            onBack = { stack.removeAt(stack.lastIndex) },
                         )
                         is Page.WarehouseRecon -> LoadReconciliationScreen(
                             vm = warehouse,

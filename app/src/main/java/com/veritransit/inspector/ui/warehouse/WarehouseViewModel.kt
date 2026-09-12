@@ -104,6 +104,76 @@ class WarehouseViewModel(app: Application) : AndroidViewModel(app) {
     /** Lets the officer re-scan a carton they deliberately want to re-check. */
     fun forgetSession() = handledThisSession.clear()
 
+    // ------------------------------------------------- receiver inner session
+    // Scanning a MASTER opens a guided checklist: the master declares N inners
+    // and the receiver must scan all N back (the sender's count is the contract).
+    // VLM photo checks fold in via applyAiFlags — they can only demote, never clear.
+
+    private val _masterCode = MutableStateFlow<String?>(null)
+    val masterCode: StateFlow<String?> = _masterCode.asStateFlow()
+
+    private val _masterChildren = MutableStateFlow<List<PackageEntity>>(emptyList())
+    val masterChildren: StateFlow<List<PackageEntity>> = _masterChildren.asStateFlow()
+
+    private val _innerScanned = MutableStateFlow<Set<String>>(emptySet())
+    val innerScanned: StateFlow<Set<String>> = _innerScanned.asStateFlow()
+
+    private val _aiNote = MutableStateFlow<String?>(null)
+    val aiNote: StateFlow<String?> = _aiNote.asStateFlow()
+
+    fun engineForAi(): VerificationEngine? = engine
+
+    /** Folds VLM visual flags into the current verdict (one-directional). */
+    fun applyAiFlags(flags: Map<String, Boolean>, observation: String = "") {
+        val e = engine ?: return
+        val cur = _verdict.value ?: return
+        _verdict.value = e.applyAiFlags(cur, flags)
+        _aiNote.value = observation
+        viewModelScope.launch {
+            cur.token?.let { token ->
+                repo.recordScan(
+                    packageCode = token.packageCode,
+                    shipmentRef = _selected.value,
+                    kind = com.veritransit.core.ScanKind.RECEIVE,
+                    result = _verdict.value?.result ?: cur.result,
+                    reasons = _verdict.value?.reasons ?: cur.reasons,
+                    aiFlags = flags,
+                )
+            }
+        }
+    }
+
+    /** Called when a MASTER verdict lands — loads its declared inners. */
+    fun startMasterSession(master: String) {
+        _masterCode.value = master
+        _innerScanned.value = emptySet()
+        _aiNote.value = null
+        viewModelScope.launch {
+            _masterChildren.value = repo.masterChildren(master)
+        }
+    }
+
+    fun onInnerCode(code: String): Boolean {
+        val norm = code.trim().uppercase()
+        if (norm.isEmpty() || _innerScanned.value.contains(norm)) return false
+        _innerScanned.value = _innerScanned.value + norm
+        viewModelScope.launch {
+            val e = engine ?: repo.engine().also { engine = it }
+            val known = repo.packageByCode(norm)
+            val qr = known?.labelPayload ?: norm
+            val verdict = e.evaluate(qr, norm, _selected.value, ScanKind.RECEIVE)
+            repo.recordScan(norm, _selected.value, ScanKind.RECEIVE, verdict.result, verdict.reasons)
+        }
+        return true
+    }
+
+    fun clearMasterSession() {
+        _masterCode.value = null
+        _masterChildren.value = emptyList()
+        _innerScanned.value = emptySet()
+        _aiNote.value = null
+    }
+
     fun sync() {
         viewModelScope.launch {
             _syncing.value = true

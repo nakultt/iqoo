@@ -150,9 +150,15 @@ private fun FinanceChip(status: String, held: Double?) {
  * the verdict card answers before the officer lowers the phone.
  */
 @Composable
-fun PackageScanScreen(vm: WarehouseViewModel, kind: ScanKind, onDone: () -> Unit) {
+fun PackageScanScreen(
+    vm: WarehouseViewModel,
+    kind: ScanKind,
+    onDone: () -> Unit,
+    onAiCheck: (String) -> Unit = {},
+) {
     val context = LocalContext.current
     val verdict by vm.verdict.collectAsState()
+    val aiNote by vm.aiNote.collectAsState()
     val (done, total) = vm.accounted.collectAsState().value
 
     var hasCamera by remember {
@@ -191,7 +197,14 @@ fun PackageScanScreen(vm: WarehouseViewModel, kind: ScanKind, onDone: () -> Unit
             }
         }
 
-        verdict?.let { VerdictCard(it, Modifier.align(Alignment.BottomCenter)) { vm.clearVerdict() } }
+        verdict?.let { v ->
+            VerdictCard(
+                v, Modifier.align(Alignment.BottomCenter),
+                aiNote = aiNote,
+                onAiCheck = v.token?.let { t -> { onAiCheck(t.packageCode) } },
+                onDismiss = { vm.clearVerdict() },
+            )
+        }
 
         FilledTonalButton(
             onClick = onDone,
@@ -241,6 +254,8 @@ private fun CameraViewfinder(onCodes: (String?, String?) -> Unit) {
 private fun VerdictCard(
     verdict: VerificationEngine.Verdict,
     modifier: Modifier = Modifier,
+    aiNote: String? = null,
+    onAiCheck: (() -> Unit)? = null,
     onDismiss: () -> Unit,
 ) {
     val color = when (verdict.result) {
@@ -276,13 +291,24 @@ private fun VerdictCard(
             }
             if (verdict.declaredInners > 0) {
                 Spacer(Modifier.height(8.dp))
-                Text("Master declares ${verdict.declaredInners} inner boxes — open and verify.",
+                Text("Master declares ${verdict.declaredInners} inner boxes — open & scan all $verdict.declaredInners inners, then AI-check the contents.",
                     color = Color.White, fontWeight = FontWeight.SemiBold,
                     style = MaterialTheme.typography.bodySmall)
             }
+            aiNote?.let {
+                Spacer(Modifier.height(6.dp))
+                Text("AI: $it", color = Color.White, style = MaterialTheme.typography.bodySmall)
+            }
             Spacer(Modifier.height(10.dp))
-            TextButton(onClick = onDismiss) {
-                Text("Next", color = Color.White, fontWeight = FontWeight.Bold)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (onAiCheck != null && com.veritransit.inspector.ai.NpuEngine.isReady) {
+                    TextButton(onClick = onAiCheck) {
+                        Text("AI photo check", color = Color.White, fontWeight = FontWeight.Bold)
+                    }
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("Next", color = Color.White, fontWeight = FontWeight.Bold)
+                }
             }
         }
     }
