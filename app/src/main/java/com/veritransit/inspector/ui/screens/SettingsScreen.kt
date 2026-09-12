@@ -41,7 +41,9 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.veritransit.inspector.ai.LlmGateway
 import com.veritransit.inspector.ai.NpuEngine
+import com.veritransit.inspector.ai.OpenRouterClient
 import com.veritransit.inspector.data.Repo
 import com.veritransit.inspector.ui.components.SectionLabel
 import com.veritransit.inspector.ui.components.SecondaryButton
@@ -126,9 +128,23 @@ fun SettingsScreen(
                 Divider()
                 InfoRow("Build", "VT-100 · Field Release")
                 Divider()
-                InfoRow("Data storage", "On-device only")
+                InfoRow(
+                    "Data storage",
+                    if (LlmGateway.cloudReady) {
+                        "On-device · fallback turns send the prompt & photo"
+                    } else {
+                        "On-device only"
+                    },
+                )
                 Divider()
-                InfoRow("Inference", "Snapdragon NPU · offline")
+                InfoRow(
+                    "Inference",
+                    if (LlmGateway.cloudReady) {
+                        "Snapdragon NPU · " + OpenRouterClient.DISPLAY_NAME + " fallback"
+                    } else {
+                        "Snapdragon NPU · offline"
+                    },
+                )
             }
         }
         Spacer(Modifier.height(26.dp))

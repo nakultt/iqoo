@@ -307,6 +307,7 @@ object InspectorAi {
     suspend fun draftNote(
         record: InspectionRecord,
         onToken: (String) -> Unit = {},
+        onLegSwitch: () -> Unit = {},
     ): Result<String> {
         val lines = record.items.joinToString("\n") { item ->
             when (item.status) {
@@ -334,6 +335,7 @@ object InspectorAi {
             temperature = 0.35f,
             label = "Drafting remarks",
             onToken = onToken,
+            onLegSwitch = onLegSwitch,
         ).map { it.trim().removeSurrounding("\"") }
     }
 

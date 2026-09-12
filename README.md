@@ -71,6 +71,11 @@ ends up inside the APK but never inside source control (GitHub push
 protection rejects commits carrying keys). Without a key the cloud leg is
 disabled and the app behaves as before: on-device model or demo path.
 
+Know the exposure: anything compiled into an APK is extractable
+(`apkanalyzer`/`strings`), so whoever holds an APK holds the key. Keep the
+distribution list short, set a spend limit on the OpenRouter account, and
+rotate by changing `local.properties` and rebuilding.
+
 ### Running the on-device tests
 
 ```bash

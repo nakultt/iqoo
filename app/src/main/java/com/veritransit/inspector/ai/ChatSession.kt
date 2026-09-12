@@ -99,21 +99,32 @@ class ChatSession {
                     builder.append(token)
                     pending = builder.toString()
                 },
+                // If the NPU leg died mid-stream and the cloud leg took over,
+                // the dead leg's tokens must not stay in the transcript view.
+                onLegSwitch = {
+                    builder.setLength(0)
+                    pending = ""
+                },
             ).onSuccess { reply ->
-                val measured = LlmGateway.lastPromptTokens
-                if (measured > 0) {
-                    // Both anchors commit together, so the drift term is
-                    // always measured-vs-predicted for one and the same
-                    // exchange. The NPU profile and the OpenRouter usage
-                    // report both feed this — which backend answered is
-                    // irrelevant, the anchor is token-count vs estimate.
-                    measuredPromptTokens = measured
-                    predictedPromptTokens = predicted
-                    Log.i(
-                        TAG,
-                        "prompt measured at $measuredPromptTokens tokens " +
-                            "(estimated $predictedPromptTokens, drift ${measuredPromptTokens - predictedPromptTokens})",
-                    )
+                // The trim budget is sized for the bundle's window, so only an
+                // NPU measurement may steer it: the fallback's tokenizer counts
+                // the same transcript differently, and image tokens are
+                // accounted per the provider, not the bundle's flat 256. Cloud
+                // usage is display-only (it does feed lastStats).
+                if (LlmGateway.lastBackend == LlmGateway.Backend.NPU) {
+                    val measured = LlmGateway.lastPromptTokens
+                    if (measured > 0) {
+                        // Both anchors commit together, so the drift term is
+                        // always measured-vs-predicted for one and the same
+                        // exchange.
+                        measuredPromptTokens = measured
+                        predictedPromptTokens = predicted
+                        Log.i(
+                            TAG,
+                            "prompt measured at $measuredPromptTokens tokens " +
+                                "(estimated $predictedPromptTokens, drift ${measuredPromptTokens - predictedPromptTokens})",
+                        )
+                    }
                 }
                 turns.add(
                     ChatTurn(
@@ -124,7 +135,8 @@ class ChatSession {
                 )
             }.onFailure {
                 error = it.message ?: "Generation failed"
-                turns.removeAt(turns.lastIndex)
+                // The officer's message stays in the transcript: deleting it
+                // turned a failed send into a lost message with no retry.
             }
         } finally {
             streaming = false

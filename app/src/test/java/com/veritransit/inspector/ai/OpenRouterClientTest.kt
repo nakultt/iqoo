@@ -2,6 +2,11 @@ package com.veritransit.inspector.ai
 
 import com.geniex.sdk.bean.VlmChatMessage
 import com.geniex.sdk.bean.VlmContent
+import kotlinx.coroutines.async
+import kotlinx.coroutines.runBlocking
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -165,5 +170,128 @@ class OpenRouterClientTest {
 
         assertEquals("length", acc.finishReason)
         assertTrue(acc.content.isEmpty())
+    }
+
+    // --------------------------------------------- task message assembly
+
+    @Test
+    fun `task messages put the system turn first and images before the prompt`() {
+        val messages = OpenRouterClient.buildTaskMessages(
+            systemPrompt = "You read bills.",
+            userPrompt = "Read it.",
+            imagePaths = listOf("/evidence/bill.jpg"),
+            readBytes = { "JPEGBYTES".toByteArray() },
+        )
+
+        assertEquals(2, messages.size)
+        assertEquals("system", messages[0].role)
+        assertEquals(listOf(OpenRouterClient.ContentPart.text("You read bills.")), messages[0].content)
+        assertEquals("user", messages[1].role)
+        assertEquals(2, messages[1].content.size)
+        assertTrue(messages[1].content[0].imageUrl!!.url.startsWith("data:image/jpeg;base64,"))
+        assertEquals("Read it.", messages[1].content[1].text)
+
+        // A blank system prompt is omitted, not sent as an empty turn.
+        val noSystem = OpenRouterClient.buildTaskMessages("", "hi", emptyList())
+        assertEquals(1, noSystem.size)
+        assertEquals("user", noSystem[0].role)
+    }
+
+    // --------------------------------------- HTTP paths via a local server
+
+    @Test
+    fun `http 402 becomes an officer-readable credit failure`() {
+        val server = MockWebServer()
+        server.start()
+        server.enqueue(
+            MockResponse().setResponseCode(402).setBody("""{"error":{"message":"insufficient credits"}}"""),
+        )
+        val previousEndpoint = OpenRouterClient.endpoint
+        val previousKey = OpenRouterClient.apiKey
+        OpenRouterClient.endpoint = server.url("/v1/chat/completions").toString()
+        OpenRouterClient.apiKey = "test-key"
+        try {
+            val result = runBlocking { OpenRouterClient.chat("sys", "read this") }
+            assertTrue(result.isFailure)
+            val message = result.exceptionOrNull()?.message.orEmpty()
+            assertTrue(message.contains("out of credit"), message)
+        } finally {
+            OpenRouterClient.endpoint = previousEndpoint
+            OpenRouterClient.apiKey = previousKey
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `aborting mid stream keeps the partial reply`() {
+        val server = MockWebServer()
+        server.start()
+        // Plenty of chunks at a crawl, so the stream is still open when the
+        // abort lands.
+        val chunks = (1..200).joinToString("") {
+            "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n"
+        }
+        server.enqueue(
+            MockResponse()
+                .setHeader("Content-Type", "text/event-stream")
+                .throttleBody(8, 50, TimeUnit.MILLISECONDS)
+                .setBody(chunks),
+        )
+        val previousEndpoint = OpenRouterClient.endpoint
+        val previousKey = OpenRouterClient.apiKey
+        OpenRouterClient.endpoint = server.url("/v1/chat/completions").toString()
+        OpenRouterClient.apiKey = "test-key"
+        try {
+            // Abort on the first decoded token — deterministic, no sleeps.
+            val result = runBlocking {
+                async {
+                    OpenRouterClient.chat("sys", "read this", onToken = { OpenRouterClient.cancel() })
+                }.await()
+            }
+            // Stopping mirrors the NPU leg: whatever arrived stays a success.
+            assertTrue(
+                result.isSuccess,
+                "expected success, got: ${result.exceptionOrNull()?.javaClass?.simpleName}: ${result.exceptionOrNull()?.message}",
+            )
+            assertTrue(!result.getOrNull().isNullOrEmpty(), "partial was empty")
+        } finally {
+            OpenRouterClient.endpoint = previousEndpoint
+            OpenRouterClient.apiKey = previousKey
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `streamed tokens reach the caller as they decode`() {
+        val server = MockWebServer()
+        server.start()
+        val body = """
+            data: {"choices":[{"delta":{"content":"One pallet"}}]}
+
+            data: {"choices":[{"delta":{"reasoning":"ignored"}}]}
+
+            data: {"choices":[{"delta":{"content":" of cartons"}}]}
+
+            data: [DONE]
+
+        """.trimIndent()
+        server.enqueue(
+            MockResponse().setHeader("Content-Type", "text/event-stream").setBody(body),
+        )
+        val previousEndpoint = OpenRouterClient.endpoint
+        val previousKey = OpenRouterClient.apiKey
+        OpenRouterClient.endpoint = server.url("/v1/chat/completions").toString()
+        OpenRouterClient.apiKey = "test-key"
+        try {
+            val seen = mutableListOf<String>()
+            val result = runBlocking { OpenRouterClient.chat("sys", "read this", onToken = { seen.add(it) }) }
+            assertTrue(result.isSuccess)
+            assertEquals("One pallet of cartons", result.getOrNull())
+            assertEquals(listOf("One pallet", " of cartons"), seen)
+        } finally {
+            OpenRouterClient.endpoint = previousEndpoint
+            OpenRouterClient.apiKey = previousKey
+            server.shutdown()
+        }
     }
 }

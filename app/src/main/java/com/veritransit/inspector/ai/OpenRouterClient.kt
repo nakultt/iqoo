@@ -19,6 +19,7 @@ import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.UnknownHostException
 import java.util.Base64
 
 /**
@@ -48,15 +49,16 @@ object OpenRouterClient {
      * rather than stored in source control; [isConfigured] gates the cloud
      * leg when it is absent.
      */
-    val API_KEY: String = BuildConfig.OPENROUTER_API_KEY.trim()
+    internal var apiKey: String = BuildConfig.OPENROUTER_API_KEY.trim()
 
     /** False when no key was injected at build time — the cloud leg is off. */
-    val isConfigured: Boolean get() = API_KEY.isNotEmpty()
+    val isConfigured: Boolean get() = apiKey.isNotEmpty()
 
     const val MODEL = "z-ai/glm-5.3-flash"
     const val DISPLAY_NAME = "GLM-5.3-Flash"
 
-    private const val ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
+    /** Overridden by the JVM tests, which point it at a local mock server. */
+    internal var endpoint = "https://openrouter.ai/api/v1/chat/completions"
 
     /**
      * Headroom for thinking tokens, on top of the caller's reply budget, and
@@ -87,23 +89,8 @@ object OpenRouterClient {
         maxTokens: Int = 640,
         temperature: Float = 0.2f,
         onToken: (String) -> Unit = {},
-    ): Result<String> {
-        val messages = buildList {
-            if (systemPrompt.isNotBlank()) {
-                add(RequestMessage("system", listOf(ContentPart.text(systemPrompt))))
-            }
-            add(
-                RequestMessage(
-                    role = "user",
-                    content = buildList {
-                        imagePaths.forEach { add(ContentPart.imageDataUrl(imageDataUrl(it))) }
-                        add(ContentPart.text(userPrompt))
-                    },
-                ),
-            )
-        }
-        return send(messages, maxTokens, temperature, onToken)
-    }
+    ): Result<String> =
+        send(buildTaskMessages(systemPrompt, userPrompt, imagePaths), maxTokens, temperature, onToken)
 
     /**
      * Multi-turn conversation — the cloud twin of [NpuEngine.converse]. The
@@ -144,6 +131,31 @@ object OpenRouterClient {
     @Volatile private var connection: HttpURLConnection? = null
     @Volatile private var aborted = false
 
+    /**
+     * The task shape used by [chat]: an optional system turn, then one user
+     * turn carrying any photos before the prompt text. Split out from [chat]
+     * so the assembly is unit-testable like [mapTurns].
+     */
+    internal fun buildTaskMessages(
+        systemPrompt: String,
+        userPrompt: String,
+        imagePaths: List<String>,
+        readBytes: (String) -> ByteArray = { File(it).readBytes() },
+    ): List<RequestMessage> = buildList {
+        if (systemPrompt.isNotBlank()) {
+            add(RequestMessage("system", listOf(ContentPart.text(systemPrompt))))
+        }
+        add(
+            RequestMessage(
+                role = "user",
+                content = buildList {
+                    imagePaths.forEach { add(ContentPart.imageDataUrl(imageDataUrl(it, readBytes))) }
+                    add(ContentPart.text(userPrompt))
+                },
+            ),
+        )
+    }
+
     private suspend fun send(
         messages: List<RequestMessage>,
         maxTokens: Int,
@@ -154,6 +166,8 @@ object OpenRouterClient {
             callMutex.withLock { stream(messages, maxTokens, temperature, onToken) }
         } catch (e: CancellationException) {
             throw e
+        } catch (e: UnknownHostException) {
+            Result.failure(IOException("No network — the cloud fallback needs a connection"))
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -171,32 +185,37 @@ object OpenRouterClient {
         aborted = false
         val request = buildRequest(messages, maxTokens, temperature)
 
-        val conn = URL(ENDPOINT).openConnection() as HttpURLConnection
+        val conn = URL(endpoint).openConnection() as HttpURLConnection
         connection = conn
         try {
             conn.requestMethod = "POST"
             conn.connectTimeout = CONNECT_TIMEOUT_MS
             conn.readTimeout = READ_TIMEOUT_MS
             conn.doOutput = true
-            conn.setRequestProperty("Authorization", "Bearer $API_KEY")
+            conn.setRequestProperty("Authorization", "Bearer $apiKey")
             conn.setRequestProperty("Content-Type", "application/json")
             conn.setRequestProperty("X-Title", "VeriTransit")
             conn.outputStream.use { it.write(json.encodeToString(request).toByteArray()) }
 
-            val code = conn.responseCode
-            if (code != HttpURLConnection.HTTP_OK) {
-                val body = conn.errorStream?.bufferedReader()?.readText().orEmpty()
-                val detail = errorMessage(body).ifEmpty { "request failed" }
-                return Result.failure(IOException("OpenRouter HTTP $code: $detail"))
-            }
-
-            val reply = ReplyAccumulator()
-            conn.inputStream.bufferedReader().useLines { lines ->
-                for (line in lines) {
-                    coroutineContext.ensureActive()
-                    if (aborted) break
-                    reply.feedLine(line)
+            val reply = ReplyAccumulator(onDelta = onToken)
+            try {
+                val code = conn.responseCode
+                if (code != HttpURLConnection.HTTP_OK) {
+                    val body = conn.errorStream?.bufferedReader()?.readText().orEmpty()
+                    return Result.failure(IOException(describeHttpError(code, body)))
                 }
+                conn.inputStream.bufferedReader().useLines { lines ->
+                    for (line in lines) {
+                        coroutineContext.ensureActive()
+                        if (aborted) break
+                        reply.feedLine(line)
+                    }
+                }
+            } catch (e: IOException) {
+                // A disconnect raced any stage of the call — connecting,
+                // reading headers, or reading the stream. Whatever the reply
+                // collected before the abort still stands.
+                if (!aborted) throw e
             }
 
             reply.errorMessage?.let {
@@ -208,14 +227,11 @@ object OpenRouterClient {
             val text = reply.content
             when {
                 text.isNotBlank() -> return Result.success(text)
-                // Stopped with nothing on the wire yet: report it, so the caller
-                // does not commit an empty reply as if the model had spoken.
-                aborted -> return Result.failure(IOException("Generation stopped"))
+                // Stopped before anything arrived: mirror the NPU leg, which
+                // ends with an empty success the caller renders as "(no reply)".
+                aborted -> return Result.success("")
                 reply.finishReason == "length" -> return Result.failure(
-                    IOException(
-                        "OpenRouter: reply was empty — the model's reasoning " +
-                            "exhausted the completion budget",
-                    ),
+                    IOException("OpenRouter: the model produced no answer within the token budget"),
                 )
                 else -> return Result.failure(IOException("OpenRouter: empty reply from model"))
             }
@@ -245,6 +261,20 @@ object OpenRouterClient {
         reasoning = ReasoningConfig(exclude = true, maxTokens = REASONING_TOKENS),
     )
 
+    /**
+     * Officer-readable failure for the non-200 paths; the raw server detail
+     * only survives where it is actionable (and lands in logs via the caller).
+     */
+    private fun describeHttpError(code: Int, body: String): String {
+        val detail = errorMessage(body).ifEmpty { "request failed" }
+        return when (code) {
+            401, 403 -> "OpenRouter: the API key was rejected ($detail)"
+            402 -> "OpenRouter: the cloud account is out of credit"
+            429 -> "OpenRouter: cloud is busy or rate-limited — retry shortly"
+            else -> "OpenRouter HTTP $code: $detail"
+        }
+    }
+
     /** Pulls `error.message` out of an OpenRouter JSON error body, if it is one. */
     private fun errorMessage(body: String): String =
         runCatching { json.decodeFromString<ErrorBody>(body).error?.message }.getOrNull().orEmpty()
@@ -259,10 +289,13 @@ object OpenRouterClient {
      * a provider that ignores it must not leak thinking into an officer's
      * record), the final usage chunk, and an `error` object carried mid-stream.
      */
-    internal class ReplyAccumulator {
+    internal class ReplyAccumulator(onDelta: (String) -> Unit = {}) {
 
         var content: String = ""
             private set
+
+        /** Fires on the reader thread for each decoded reply fragment. */
+        private val onDelta = onDelta
 
         var usage: Usage? = null
             private set
@@ -291,7 +324,10 @@ object OpenRouterClient {
                 return
             }
             chunk.choices.firstOrNull()?.let { choice ->
-                choice.delta.content?.let { content += it }
+                choice.delta.content?.let {
+                    content += it
+                    onDelta(it)
+                }
                 choice.finishReason?.let { finishReason = it }
             }
             chunk.usage?.let { usage = it }

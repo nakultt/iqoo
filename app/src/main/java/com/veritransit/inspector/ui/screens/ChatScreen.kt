@@ -150,8 +150,8 @@ fun ChatScreen(session: ChatSession, onBack: () -> Unit) {
                         "The on-device model is not loaded — replies come from " +
                             OpenRouterClient.DISPLAY_NAME + " via OpenRouter until it is."
                     } else {
-                        "The model is not loaded and no OpenRouter API key is " +
-                            "configured — set openrouter.api.key in local.properties."
+                        "The on-device model is not loaded and this build has no " +
+                            "cloud key — AI is unavailable on this screen."
                     },
                 )
             }

@@ -5,6 +5,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.geniex.sdk.bean.VlmChatMessage
+import java.io.IOException
 
 /**
  * Routes every AI task in the app: the on-device NPU model first, and — when
@@ -70,12 +71,11 @@ object LlmGateway {
         get() = when (lastBackend) {
             Backend.NPU -> "${NpuEngine.DISPLAY_NAME} · on-device"
             Backend.CLOUD -> "${OpenRouterClient.DISPLAY_NAME} · cloud"
-            null ->
-                if (NpuEngine.isReady) {
-                    "${NpuEngine.DISPLAY_NAME} · on-device"
-                } else {
-                    "${OpenRouterClient.DISPLAY_NAME} · cloud fallback"
-                }
+            null -> when {
+                NpuEngine.isReady -> "${NpuEngine.DISPLAY_NAME} · on-device"
+                OpenRouterClient.isConfigured -> "${OpenRouterClient.DISPLAY_NAME} · cloud fallback"
+                else -> "no AI backend available"
+            }
         }
 
     /**
@@ -90,7 +90,10 @@ object LlmGateway {
         temperature: Float = 0.2f,
         label: String? = null,
         onToken: (String) -> Unit = {},
+        onLegSwitch: () -> Unit = {},
     ): Result<String> {
+        stopRequested = false
+        var localEmitted = false
         if (NpuEngine.isReady) {
             val local = NpuEngine.run(
                 systemPrompt = systemPrompt,
@@ -99,13 +102,22 @@ object LlmGateway {
                 maxTokens = maxTokens,
                 temperature = temperature,
                 label = label,
-                onToken = onToken,
+                onToken = { token ->
+                    localEmitted = true
+                    onToken(token)
+                },
             )
             if (local.isSuccess) {
                 recordNpu()
                 return local
             }
             logFallback(local.exceptionOrNull())
+            // A Stop the user pressed must not turn into a fresh paid
+            // generation on the other leg.
+            if (stopRequested) return Result.failure(IOException("Generation stopped"))
+            // The dead leg may have fed the caller's accumulator already;
+            // the cloud stream must start from a clean slate.
+            if (localEmitted) onLegSwitch()
         }
         return OpenRouterClient.chat(
             systemPrompt = systemPrompt,
@@ -128,20 +140,28 @@ object LlmGateway {
         maxTokens: Int = 512,
         temperature: Float = 0.7f,
         onToken: (String) -> Unit = {},
+        onLegSwitch: () -> Unit = {},
     ): Result<String> {
+        stopRequested = false
+        var localEmitted = false
         if (NpuEngine.isReady) {
             val local = NpuEngine.converse(
                 turns = turns,
                 mediaTurn = mediaTurn,
                 maxTokens = maxTokens,
                 temperature = temperature,
-                onToken = onToken,
+                onToken = { token ->
+                    localEmitted = true
+                    onToken(token)
+                },
             )
             if (local.isSuccess) {
                 recordNpu()
                 return local
             }
             logFallback(local.exceptionOrNull())
+            if (stopRequested) return Result.failure(IOException("Generation stopped"))
+            if (localEmitted) onLegSwitch()
         }
         return OpenRouterClient.converse(
             turns = turns,
@@ -153,9 +173,18 @@ object LlmGateway {
 
     /** Stops the in-flight generation on whichever backend is streaming. */
     fun stop() {
+        stopRequested = true
         NpuEngine.stop()
         OpenRouterClient.cancel()
     }
+
+    /**
+     * Set by [stop] and cleared at the start of the next call, so a stopped
+     * local leg is reported as stopped rather than silently re-served by the
+     * cloud leg.
+     */
+    @Volatile
+    private var stopRequested = false
 
     private fun logFallback(cause: Throwable?) {
         Log.w(

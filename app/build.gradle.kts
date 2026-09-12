@@ -120,6 +120,10 @@ dependencies {
     // a device or the model bundle.
     testImplementation(kotlin("test"))
 
+    // Local HTTP server for the OpenRouter client's error/abort paths — real
+    // HttpURLConnection against a loopback socket, no network needed.
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+
     // Instrumented checks for the NPU path — they need a real Hexagon, so they
     // only run on a device with the bundle already pulled.
     androidTestImplementation("androidx.test:runner:1.6.2")

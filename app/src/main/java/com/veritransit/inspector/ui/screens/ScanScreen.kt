@@ -83,6 +83,7 @@ import com.veritransit.inspector.ai.LlmGateway
 import com.veritransit.inspector.ai.EvidenceViewfinder
 import com.veritransit.inspector.ai.InspectorAi
 import com.veritransit.inspector.ai.NpuEngine
+import com.veritransit.inspector.ai.OpenRouterClient
 import com.veritransit.inspector.data.Manifest
 import com.veritransit.inspector.data.Presets
 import com.veritransit.inspector.ui.BillSections
@@ -442,6 +443,12 @@ private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedba
         }
 
         if (live) {
+            if (!NpuEngine.isReady) {
+                NoticeStrip(
+                    "The on-device model is not loaded — the bill photo will be " +
+                        "sent to ${OpenRouterClient.DISPLAY_NAME} on OpenRouter.",
+                )
+            }
             PrimaryButton(
                 text = when {
                     reading -> "Reading…"
@@ -452,7 +459,7 @@ private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedba
                 enabled = camera.ready && !reading,
                 icon = Icons.Rounded.QrCodeScanner,
             )
-        } else if (NpuEngine.isReady && !cameraGranted) {
+        } else if (LlmGateway.isAvailable && !cameraGranted) {
             SecondaryButton(
                 "Enable camera for live reading",
                 { askCamera.launch(AndroidPermission.permission.CAMERA) },
@@ -461,6 +468,9 @@ private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedba
             )
         }
 
+        if (!LlmGateway.isAvailable) {
+            NoticeStrip("No AI backend — this is a scripted demo scene, not a live read.")
+        }
         readError?.let { NoticeStrip(it) }
     }
 

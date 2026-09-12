@@ -66,6 +66,7 @@ import com.veritransit.inspector.ai.LlmGateway
 import com.veritransit.inspector.ai.EvidenceViewfinder
 import com.veritransit.inspector.ai.InspectorAi
 import com.veritransit.inspector.ai.NpuEngine
+import com.veritransit.inspector.ai.OpenRouterClient
 import com.veritransit.inspector.data.CargoItem
 import com.veritransit.inspector.data.ItemStatus
 import com.veritransit.inspector.ui.InspectionFlowState
@@ -138,6 +139,7 @@ fun CargoScanScreen(
                         flow.aiObservation = scan.observation
                         flow.aiConfidence = scan.confidence
                         flow.reconciledByAi = true
+                        flow.reconciledBy = LlmGateway.lastBackend
                         flow.scanProgress = 0
                         revealAndFinish()
                     }
@@ -179,17 +181,29 @@ fun CargoScanScreen(
                 ) {
                     EvidenceViewfinder(camera, Modifier.fillMaxSize())
                 }
+                if (!NpuEngine.isReady) {
+                    NoticeStrip(
+                        "The on-device model is not loaded — the bay photo will " +
+                            "be sent to ${OpenRouterClient.DISPLAY_NAME} on OpenRouter.",
+                    )
+                }
                 PrimaryButton(
                     text = if (counting) "Counting…" else "Capture cargo bay",
                     onClick = ::captureAndCount,
                     enabled = camera.ready && !counting,
                 )
                 scanError?.let { NoticeStrip(it) }
-            } else if (NpuEngine.isReady && !cameraGranted && flow.scannedItems.isEmpty()) {
+            } else if (LlmGateway.isAvailable && !cameraGranted && flow.scannedItems.isEmpty()) {
                 SecondaryButton(
                     "Enable camera for live reconciliation",
                     { askCamera.launch(AndroidPermission.permission.CAMERA) },
                     modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            if (!LlmGateway.isAvailable && flow.scannedItems.isEmpty()) {
+                NoticeStrip(
+                    "No AI backend — this step runs a scripted demo walkthrough, " +
+                        "not a live count.",
                 )
             }
             VTCard {
@@ -201,7 +215,7 @@ fun CargoScanScreen(
                         Text(
                             when {
                                 !flow.reconciledByAi -> "Optical match against declared manifest"
-                                LlmGateway.lastBackend == LlmGateway.Backend.CLOUD ->
+                                flow.reconciledBy == LlmGateway.Backend.CLOUD ->
                                     "GLM-5.3-Flash vision count against declared manifest"
                                 else -> "Qwen3-VL vision count against declared manifest"
                             },
@@ -214,7 +228,7 @@ fun CargoScanScreen(
                             Text(
                                 when {
                                     !flow.reconciledByAi -> "SCANNER LIVE"
-                                    LlmGateway.lastBackend == LlmGateway.Backend.CLOUD ->
+                                    flow.reconciledBy == LlmGateway.Backend.CLOUD ->
                                         "GLM-5.3-FLASH · CLOUD"
                                     else -> "NPU · HTP0"
                                 },

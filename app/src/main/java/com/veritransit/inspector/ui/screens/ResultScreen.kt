@@ -67,7 +67,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import com.veritransit.inspector.ai.InspectorAi
 import com.veritransit.inspector.ai.LlmGateway
-import com.veritransit.inspector.ai.NpuEngine
 import com.veritransit.inspector.data.OfficerAction
 import com.veritransit.inspector.data.Verdict
 import com.veritransit.inspector.ui.InspectionFlowState
@@ -536,19 +535,41 @@ private fun NoteDialog(
 ) {
     var text by remember { mutableStateOf(initial) }
     var drafting by remember { mutableStateOf(false) }
+    var draftError by remember { mutableStateOf<String?>(null) }
     val scope = androidx.compose.runtime.rememberCoroutineScope()
 
     fun draft() {
         if (drafting) return
         drafting = true
+        draftError = null
+        // Whatever the officer had written survives a failed draft — with the
+        // cloud leg in the path, failures are ordinary (offline, out of credit).
+        val previous = text
         text = ""
         scope.launch {
             try {
                 // Streamed so the officer watches it appear rather than waiting
-                // on a spinner — decode is ~30 tok/s, long enough to notice.
-                InspectorAi.draftNote(record) { token ->
-                    scope.launch(Dispatchers.Main) { text += token }
-                }.onFailure { text = "" }
+                // on a spinner — decode is ~30 tok/s on the NPU, long enough
+                // to notice.
+                InspectorAi.draftNote(
+                    record,
+                    onToken = { token ->
+                        scope.launch(Dispatchers.Main) { text += token }
+                    },
+                    // A mid-stream switch from the NPU leg to the cloud
+                    // fallback must not leave the dead leg's tokens behind.
+                    onLegSwitch = { scope.launch(Dispatchers.Main) { text = "" } },
+                ).onSuccess { note ->
+                    // Commit the backend's reply, not the streamed
+                    // accumulation — the two agree unless a leg switch
+                    // interleaved with a straggling token.
+                    scope.launch(Dispatchers.Main) { text = note }
+                }.onFailure {
+                    scope.launch(Dispatchers.Main) {
+                        text = previous
+                        draftError = it.message ?: "The model could not draft a note."
+                    }
+                }
             } finally {
                 drafting = false
             }
@@ -574,6 +595,10 @@ private fun NoteDialog(
                         .height(90.dp),
                     cursorBrush = androidx.compose.ui.graphics.SolidColor(VT.Primary),
                 )
+                draftError?.let {
+                    Spacer(Modifier.height(8.dp))
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = VT.Crimson)
+                }
                 if (LlmGateway.isAvailable) {
                     Spacer(Modifier.height(10.dp))
                     SecondaryButton(

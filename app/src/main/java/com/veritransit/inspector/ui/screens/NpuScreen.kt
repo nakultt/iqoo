@@ -159,7 +159,14 @@ fun NpuScreen(onBack: () -> Unit, onToast: (String) -> Unit, onOpenChat: () -> U
                     )
                     SpecRow("Bundle", gib(NpuEngine.BUNDLE_BYTES))
                     SpecRow("Residency", "Auto-release · auto-reload")
-                    SpecRow("Fallback", OpenRouterClient.DISPLAY_NAME + " · OpenRouter")
+                    SpecRow(
+                        "Fallback",
+                        if (OpenRouterClient.isConfigured) {
+                            OpenRouterClient.DISPLAY_NAME + " · OpenRouter"
+                        } else {
+                            "Not configured"
+                        },
+                    )
                 }
             }
 
@@ -249,7 +256,9 @@ fun NpuScreen(onBack: () -> Unit, onToast: (String) -> Unit, onOpenChat: () -> U
 
             NoticeStrip(
                 "Weights stay on the handset. The bundle downloads once from Qualcomm's " +
-                    "asset store; after that every inspection runs with the radio off.",
+                    "asset store; after that every inspection runs with the radio off — " +
+                    "unless the bundle is absent, in which case AI tasks fall back to " +
+                    OpenRouterClient.DISPLAY_NAME + " via OpenRouter.",
             )
 
             if (status == NpuEngine.Status.DOWNLOADED) {

@@ -3,6 +3,7 @@ package com.veritransit.inspector.ui
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.veritransit.inspector.ai.LlmGateway
 import com.veritransit.inspector.data.CargoItem
 import com.veritransit.inspector.data.InspectionRecord
 import com.veritransit.inspector.data.ItemStatus
@@ -32,9 +33,15 @@ class InspectionFlowState {
     var billEvidence by mutableStateOf<String?>(null)
     var cargoEvidence by mutableStateOf<String?>(null)
 
-    /** True when this step's data came off the NPU rather than the demo presets. */
+    /** True when this step's data came from a live model read — the NPU, or
+     *  the GLM-5.3-Flash cloud fallback — rather than the demo presets. */
     var manifestFromAi by mutableStateOf(false)
     var reconciledByAi by mutableStateOf(false)
+
+    /** Which backend reconciled the bay; null on the demo and manual paths.
+     *  Captured once at read time — the gateway's lastBackend is global state
+     *  that a later call (e.g. cloud note drafting) would overwrite. */
+    var reconciledBy by mutableStateOf<LlmGateway.Backend?>(null)
 
     /** The model's one-line description of the cargo bay photo. */
     var aiObservation by mutableStateOf("")
