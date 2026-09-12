@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.Inventory2
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.QrCodeScanner
 import androidx.compose.material.icons.rounded.Settings
@@ -69,18 +70,30 @@ import com.veritransit.inspector.ui.screens.RecordsScreen
 import com.veritransit.inspector.ui.screens.ResultScreen
 import com.veritransit.inspector.ui.screens.ScanScreen
 import com.veritransit.inspector.ui.screens.SettingsScreen
+import com.veritransit.inspector.ui.warehouse.DeviceSetupPanel
+import com.veritransit.inspector.ui.warehouse.LoadReconciliationScreen
+import com.veritransit.inspector.ui.warehouse.PackageScanScreen
+import com.veritransit.inspector.ui.warehouse.ShipmentListScreen
+import com.veritransit.inspector.ui.warehouse.WarehouseViewModel
 import com.veritransit.inspector.ui.theme.Hanken
 import com.veritransit.inspector.ui.theme.VT
 import kotlin.random.Random
 
 private enum class Tab(val label: String, val icon: ImageVector) {
     HOME("Home", Icons.Rounded.Home),
-    SCAN("Scan", Icons.Rounded.QrCodeScanner),
+    SCAN("Gate", Icons.Rounded.QrCodeScanner),
+    // §6.1 — warehouse mode sits beside the existing gate flow rather than
+    // replacing it; an officer moves between both in one shift.
+    WAREHOUSE("Warehouse", Icons.Rounded.Inventory2),
     RECORDS("Records", Icons.Rounded.History),
     SETTINGS("Settings", Icons.Rounded.Settings),
 }
 
 private sealed interface Page {
+    /** Warehouse mode (§6.1): pick a shipment, scan it, reconcile the load. */
+    data class WarehouseScan(val ref: String, val receiving: Boolean) : Page
+    data class WarehouseRecon(val ref: String) : Page
+    data object DeviceSetup : Page
     data object ManifestStep : Page
     data object CargoScan : Page
     data object ResultActive : Page
@@ -106,6 +119,8 @@ fun AppRoot() {
     val chat = remember { com.veritransit.inspector.ai.ChatSession() }
     var toast by remember { mutableStateOf<String?>(null) }
     var startInManualFlag by remember { mutableStateOf(false) }
+
+    val warehouse: WarehouseViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
 
     val tone = remember { ToneGenerator(AudioManager.STREAM_NOTIFICATION, 72) }
     DisposableEffect(Unit) { onDispose { tone.release() } }
@@ -175,6 +190,11 @@ fun AppRoot() {
                             onBack = { gotoTab(Tab.HOME) },
                             feedback = { msg -> feedback(msg, beep = true) },
                         )
+                        Tab.WAREHOUSE -> ShipmentListScreen(
+                            vm = warehouse,
+                            onOpen = { ref -> stack.add(Page.WarehouseScan(ref, receiving = false)) },
+                            onSetup = { stack.add(Page.DeviceSetup) },
+                        )
                         Tab.RECORDS -> RecordsScreen(
                             now = now,
                             onOpenRecord = { id -> stack.add(Page.ResultView(id)) },
@@ -187,6 +207,22 @@ fun AppRoot() {
                         )
                     }
                     is NavTarget.PageT -> when (val page = target.page) {
+                        is Page.WarehouseScan -> PackageScanScreen(
+                            vm = warehouse,
+                            kind = if (page.receiving) com.veritransit.core.ScanKind.RECEIVE
+                                   else com.veritransit.core.ScanKind.LOAD,
+                            onDone = {
+                                stack.removeAt(stack.lastIndex)
+                                stack.add(Page.WarehouseRecon(page.ref))
+                            },
+                        )
+                        is Page.WarehouseRecon -> LoadReconciliationScreen(
+                            vm = warehouse,
+                            onBack = { stack.removeAt(stack.lastIndex) },
+                        )
+                        Page.DeviceSetup -> DeviceSetupPanel(
+                            onSynced = { feedback("Shift data cached — scanning works offline now", beep = true) },
+                        )
                         Page.NpuModel -> NpuScreen(
                             onBack = { stack.removeAt(stack.lastIndex) },
                             onToast = { feedback(it) },
