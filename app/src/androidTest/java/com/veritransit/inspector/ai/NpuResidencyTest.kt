@@ -49,16 +49,16 @@ class NpuResidencyTest {
     }
 
     @Test
-    fun backgroundGraceReleasesTheSession() = runBlocking<Unit> {
+    fun backgroundingReleasesTheSession() = runBlocking<Unit> {
         assumeTrue("model not resident", NpuEngine.isReady)
 
-        // The hook MainActivity.onStop calls: after the grace period with no
-        // activity in front, the session must let go of the NPU on its own.
+        // The hook MainActivity.onStop calls. Release is immediate — this
+        // ROM's fast_freezer parks backgrounded processes within ~10 s, so a
+        // grace period would never fire while the user is actually away.
         NpuEngine.onHostBackgrounded()
-        awaitStatus(120_000) { it == NpuEngine.Status.DOWNLOADED }
-        Log.i(TAG, "released after background grace; status=${NpuEngine.status}")
-        NpuEngine.onHostForegrounded()
-        assertTrue("session not released by background grace", NpuEngine.status == NpuEngine.Status.DOWNLOADED)
+        awaitStatus(30_000) { it == NpuEngine.Status.DOWNLOADED }
+        Log.i(TAG, "released on backgrounding; status=${NpuEngine.status}")
+        assertTrue("session not released on backgrounding", NpuEngine.status == NpuEngine.Status.DOWNLOADED)
     }
 
     companion object {

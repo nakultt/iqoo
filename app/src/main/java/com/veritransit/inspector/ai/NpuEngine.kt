@@ -172,16 +172,12 @@ object NpuEngine {
     @Volatile
     private var lastUsedAt = 0L
 
-    /** Whether the host activity is started; drives the background unload. */
-    @Volatile
-    private var hostInForeground = true
-
-    private var backgroundUnloadJob: Job? = null
     private var watchdogStarted = false
 
     /** Catalog name resolved at init; falls back to [MODEL_NAME]. */
     private var hubModelName: String = MODEL_NAME
 
+    @Volatile
     private var vlm: VlmWrapper? = null
     private var appContext: Context? = null
     private var downloadJob: Job? = null
@@ -613,7 +609,9 @@ object NpuEngine {
         val deadline = SystemClock.elapsedRealtime() + LOAD_WAIT_TIMEOUT_MS
         while (SystemClock.elapsedRealtime() < deadline) {
             vlm?.let { return it }
-            if (status == Status.ERROR) break
+            // A load that ended in failure, or a bundle that went away (delete,
+            // cancelled download) will not become resident — stop waiting.
+            if (status != Status.LOADING && status != Status.READY && status != Status.BUSY) break
             delay(250)
         }
         activity = null
@@ -676,28 +674,19 @@ object NpuEngine {
     // ------------------------------------------------- residency lifecycle
 
     /**
-     * Called by the host activity when it stops being visible. Schedules the
-     * release of the NPU session once [BACKGROUND_UNLOAD_GRACE_MS] have passed,
-     * so a brief detour to another app does not pay the load cost, but the cDSP
-     * memory is not held for the whole time the app sits in the background.
+     * Called by the host activity when it stops being visible — app switch,
+     * screen off, home. Releases the session immediately rather than after a
+     * grace period: this ROM's fast_freezer parks a backgrounded process
+     * within ~10 s of losing the screen, so anything longer never runs while
+     * the user is actually away — it would fire on their return instead. The
+     * release queues behind any in-flight inference and the next use reloads
+     * the cached bundle on demand.
      */
     fun onHostBackgrounded() {
-        hostInForeground = false
-        backgroundUnloadJob?.cancel()
-        backgroundUnloadJob = scope.launch {
-            delay(BACKGROUND_UNLOAD_GRACE_MS)
-            if (!hostInForeground && isReady) {
-                Log.i(TAG, "backgrounded > ${BACKGROUND_UNLOAD_GRACE_MS / 1000} s — releasing the NPU session")
-                unload()
-            }
+        if (isReady) {
+            Log.i(TAG, "host backgrounded — releasing the NPU session")
+            unload()
         }
-    }
-
-    /** Called by the host activity when it becomes visible again. */
-    fun onHostForegrounded() {
-        hostInForeground = true
-        backgroundUnloadJob?.cancel()
-        backgroundUnloadJob = null
     }
 
     /**
@@ -740,9 +729,6 @@ object NpuEngine {
 
     /** Idle time after which a resident session is released, freeing cDSP memory. */
     private const val IDLE_UNLOAD_MS = 5 * 60 * 1000L
-
-    /** Background time after which a resident session is released. */
-    private const val BACKGROUND_UNLOAD_GRACE_MS = 60 * 1000L
 
     /** How long an inference caller waits for an on-demand reload to finish. */
     private const val LOAD_WAIT_TIMEOUT_MS = 90 * 1000L

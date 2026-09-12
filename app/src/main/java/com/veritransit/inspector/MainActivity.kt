@@ -30,15 +30,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onStart() {
-        super.onStart()
-        NpuEngine.onHostForegrounded()
-    }
-
     override fun onStop() {
         super.onStop()
-        // Lets the residency watchdog free the cDSP memory while nothing can
-        // use it; the next inference reloads the cached bundle on demand.
+        // Releases the cDSP memory while nothing can use it (this ROM freezes
+        // backgrounded processes anyway); the next inference reloads the
+        // cached bundle on demand.
         NpuEngine.onHostBackgrounded()
     }
 }
