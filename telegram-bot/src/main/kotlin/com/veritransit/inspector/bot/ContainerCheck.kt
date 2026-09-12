@@ -122,6 +122,8 @@ object ContainerCheck {
                     when (item.status) {
                         ItemStatus.SHORTAGE ->
                             appendLine("• ${Html.esc(item.name)} — expected ${item.expected}, found ${item.found} (shortage)")
+                        ItemStatus.OVERAGE ->
+                            appendLine("• ${Html.esc(item.name)} — expected ${item.expected}, found ${item.found} (overage)")
                         ItemStatus.UNLISTED ->
                             appendLine("• ${Html.esc(item.name)} — not on manifest, found ${item.found} (unlisted)")
                         ItemStatus.MATCHED -> Unit
