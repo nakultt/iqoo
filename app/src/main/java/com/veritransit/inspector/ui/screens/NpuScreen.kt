@@ -151,8 +151,13 @@ fun NpuScreen(onBack: () -> Unit, onToast: (String) -> Unit, onOpenChat: () -> U
 
                     SpecRow("Compute unit", "Hexagon NPU")
                     SpecRow("Chipset", NpuEngine.chipset ?: "detecting…")
-                    SpecRow("Context", "${NpuEngine.CONTEXT_TOKENS} tokens")
+                    SpecRow(
+                        "Context",
+                        "${NpuEngine.bundleContextTokens} tokens" +
+                            if (NpuEngine.contextFromBundle) " · bundle" else " · default",
+                    )
                     SpecRow("Bundle", gib(NpuEngine.BUNDLE_BYTES))
+                    SpecRow("Residency", "Auto-release · auto-reload")
                 }
             }
 

@@ -3,6 +3,7 @@ package com.veritransit.inspector.ai
 import android.content.Context
 import android.os.Build
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -30,6 +31,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.io.File
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
@@ -101,11 +103,31 @@ object NpuEngine {
     /**
      * Context the bundle was compiled with, from its own `genie_config.json`
      * (`dialog.context.size`). Fixed at compile time — the runtime cannot widen
-     * it — and one photo already costs ~256 of it, so prompts and `maxTokens`
-     * are budgeted against this rather than against the 4096 the model supports
-     * off-device.
+     * it (`ModelConfig.nCtx` must stay 0) — and one photo already costs ~256 of
+     * it, so prompts and `maxTokens` are budgeted against [bundleContextTokens]
+     * rather than against the 4096 the model supports off-device.
+     *
+     * This constant is the fallback assumed until the downloaded bundle has
+     * been read; [refreshBundleContext] replaces the effective value with the
+     * bundle's own declaration, so a future bundle compiled with a larger
+     * window is used to the full automatically.
      */
-    const val CONTEXT_TOKENS = 2048
+    const val CONTEXT_TOKENS = BundleContext.DEFAULT_CONTEXT_TOKENS
+
+    /**
+     * Context window currently in force, read from the downloaded bundle when
+     * available. Observed as Compose state so the On-device AI screen shows
+     * the number the budgets actually run against.
+     */
+    var bundleContextTokens by mutableStateOf(CONTEXT_TOKENS)
+        private set
+
+    /** Whether [bundleContextTokens] came from the bundle rather than [CONTEXT_TOKENS]. */
+    var contextFromBundle by mutableStateOf(false)
+        private set
+
+    /** Window every prompt budget ([ChatSession], [InspectorAi]) must fit. */
+    val effectiveContextTokens: Int get() = bundleContextTokens
 
     enum class Status {
         /** Nothing attempted yet. */
@@ -159,9 +181,33 @@ object NpuEngine {
     /** One NPU context; concurrent generate calls would corrupt its KV cache. */
     private val inferenceLock = Mutex()
 
+    /**
+     * Serialises creating and destroying the NPU session. Without it an
+     * unload landing between a load's state check and its assignment would
+     * strand a resident wrapper the engine no longer knows about — cDSP memory
+     * held until the process dies.
+     */
+    private val lifecycleMutex = Mutex()
+
+    /** [SystemClock.elapsedRealtime] of the last load or inference completion. */
+    @Volatile
+    private var lastUsedAt = 0L
+
+    /**
+     * True between the host's onStop and onStart. A load that finishes in
+     * that window must not take residency: fast_freezer parks the process
+     * ~10 s after the screen goes off, and a ~4 GB session pinned in a frozen
+     * process is memory nobody can use until the user returns.
+     */
+    @Volatile
+    private var hostBackgrounded = false
+
+    private var watchdogStarted = false
+
     /** Catalog name resolved at init; falls back to [MODEL_NAME]. */
     private var hubModelName: String = MODEL_NAME
 
+    @Volatile
     private var vlm: VlmWrapper? = null
     private var appContext: Context? = null
     private var downloadJob: Job? = null
@@ -179,6 +225,7 @@ object NpuEngine {
         if (status != Status.COLD && status != Status.ERROR) return
         appContext = context.applicationContext
         status = Status.INITIALIZING
+        startResidencyWatchdog()
         scope.launch {
             try {
                 if (!sdkInitialised) {
@@ -187,7 +234,13 @@ object NpuEngine {
                 }
                 probeCatalog()
                 Log.i(TAG, "GenieX up, chipset=$chipset, hub model=$hubModelName")
-                status = if (isBundleCached()) Status.DOWNLOADED else Status.NOT_DOWNLOADED
+                val cached = isBundleCached()
+                if (cached) {
+                    // The bundle is already on disk: learn its real context
+                    // window now so every budget below runs against it.
+                    refreshBundleContext(runCatching { ModelManagerWrapper.getPaths(hubModelName)?.model_dir }.getOrNull())
+                }
+                status = if (cached) Status.DOWNLOADED else Status.NOT_DOWNLOADED
             } catch (e: Exception) {
                 fail("GenieX init failed: ${e.message}")
             }
@@ -365,62 +418,93 @@ object NpuEngine {
         lastError = null
         scope.launch {
             try {
-                val paths = ModelManagerWrapper.getPaths(hubModelName)
-                if (paths == null) {
-                    status = Status.NOT_DOWNLOADED
-                    lastError = "Model bundle not on disk — download it first."
-                    return@launch
-                }
-                // The bundle's manifest names the runtime it was compiled for.
-                // Anything but qairt means we pulled a GGUF by mistake and would
-                // silently land on the CPU.
-                val runtimeId = paths.runtime_id.ifEmpty { RUNTIME_QAIRT }
-                if (runtimeId != RUNTIME_QAIRT) {
-                    fail("Bundle is '$runtimeId', not an NPU (qairt) build.")
-                    return@launch
-                }
-                // QAIRT rejects non-zero n_ctx / n_gpu_layers: both are baked in
-                // at compile time in the AI Hub bundle and cannot be overridden.
-                val config = ModelConfig(nCtx = 0, nGpuLayers = 0, nThreads = 8)
-                val input = VlmCreateInput(
-                    model_path = paths.model_path,
-                    mmproj_path = paths.mmproj_path,
-                    config = config,
-                    runtime_id = runtimeId,
-                    compute_unit = COMPUTE_UNIT,
-                )
-
-                // The bundle is four weight-shared context binaries. Creating
-                // them asks the DSP for a large block up front, and when
-                // something else on the phone is already holding cDSP memory the
-                // third one comes back QNN_COMMON_ERROR_RESOURCE_UNAVAILABLE
-                // (1007). That clears on its own once the other client lets go,
-                // so the load is retried before it is called a failure.
-                var lastError: Throwable? = null
-                for (attempt in 1..LOAD_ATTEMPTS) {
-                    val result = VlmWrapper.builder().vlmCreateInput(input).build()
-                    result.onSuccess { wrapper ->
-                        vlm = wrapper
-                        loadFailures = 0
+                lifecycleMutex.withLock {
+                    // An unload may have completed while this call was being
+                    // scheduled; trust the mutex-protected state, not the
+                    // pre-lock check above.
+                    if (vlm != null) {
                         status = Status.READY
-                        Log.i(TAG, "Qwen3-VL-4B resident on $COMPUTE_UNIT (attempt $attempt)")
-                        return@launch
+                        return@withLock
                     }
-                    lastError = result.exceptionOrNull()
-                    Log.w(TAG, "load attempt $attempt/$LOAD_ATTEMPTS failed: ${lastError?.message}")
-                    if (attempt < LOAD_ATTEMPTS) delay(attempt * LOAD_RETRY_BACKOFF_MS)
-                }
+                    val paths = ModelManagerWrapper.getPaths(hubModelName)
+                    if (paths == null) {
+                        status = Status.NOT_DOWNLOADED
+                        lastError = "Model bundle not on disk — download it first."
+                        return@withLock
+                    }
+                    // The on-disk bundle is the authority on the context window:
+                    // re-read it on every load in case a re-pull changed it.
+                    refreshBundleContext(paths.model_dir)
+                    // The bundle's manifest names the runtime it was compiled for.
+                    // Anything but qairt means we pulled a GGUF by mistake and would
+                    // silently land on the CPU.
+                    val runtimeId = paths.runtime_id.ifEmpty { RUNTIME_QAIRT }
+                    if (runtimeId != RUNTIME_QAIRT) {
+                        fail("Bundle is '$runtimeId', not an NPU (qairt) build.")
+                        return@withLock
+                    }
+                    // QAIRT rejects non-zero n_ctx / n_gpu_layers: both are baked in
+                    // at compile time in the AI Hub bundle and cannot be overridden.
+                    val config = ModelConfig(nCtx = 0, nGpuLayers = 0, nThreads = 8)
+                    val input = VlmCreateInput(
+                        model_path = paths.model_path,
+                        mmproj_path = paths.mmproj_path,
+                        config = config,
+                        runtime_id = runtimeId,
+                        compute_unit = COMPUTE_UNIT,
+                    )
 
-                loadFailures++
-                // Nothing in this process can release another client's DSP
-                // allocation, and our own stranded contexts only go when the
-                // process does — so say what actually helps.
-                val hint = if (loadFailures > 1) {
-                    " The NPU is busy. Close other AI apps, or restart this app."
-                } else {
-                    ""
+                    // The bundle is four weight-shared context binaries. Creating
+                    // them asks the DSP for a large block up front, and when
+                    // something else on the phone is already holding cDSP memory the
+                    // third one comes back QNN_COMMON_ERROR_RESOURCE_UNAVAILABLE
+                    // (1007). That clears on its own once the other client lets go,
+                    // so the load is retried before it is called a failure.
+                    var created: VlmWrapper? = null
+                    var lastLoadError: Throwable? = null
+                    var attempt = 0
+                    while (created == null && attempt < LOAD_ATTEMPTS) {
+                        attempt++
+                        val result = VlmWrapper.builder().vlmCreateInput(input).build()
+                        created = result.getOrNull()
+                        if (created == null) {
+                            lastLoadError = result.exceptionOrNull()
+                            Log.w(TAG, "load attempt $attempt/$LOAD_ATTEMPTS failed: ${lastLoadError?.message}")
+                            if (attempt < LOAD_ATTEMPTS) delay(attempt * LOAD_RETRY_BACKOFF_MS)
+                        }
+                    }
+
+                    if (created != null) {
+                        if (hostBackgrounded) {
+                            // The host went away while this create was in
+                            // flight (onHostBackgrounded no-ops on LOADING).
+                            // Roll the fresh session back instead of pinning
+                            // it in a process the freezer is about to park;
+                            // the next foregrounded use reloads on demand.
+                            Log.i(TAG, "load completed while host backgrounded — releasing the fresh session")
+                            runCatching { created.stopStream() }
+                            runCatching { created.destroy() }
+                            status = if (isBundleCached()) Status.DOWNLOADED else Status.NOT_DOWNLOADED
+                        } else {
+                            vlm = created
+                            loadFailures = 0
+                            lastUsedAt = SystemClock.elapsedRealtime()
+                            status = Status.READY
+                            Log.i(TAG, "Qwen3-VL-4B resident on $COMPUTE_UNIT (attempt $attempt)")
+                        }
+                    } else {
+                        loadFailures++
+                        // Nothing in this process can release another client's DSP
+                        // allocation, and our own stranded contexts only go when the
+                        // process does — so say what actually helps.
+                        val hint = if (loadFailures > 1) {
+                            " The NPU is busy. Close other AI apps, or restart this app."
+                        } else {
+                            ""
+                        }
+                        fail("Load failed: ${lastLoadError?.message}.$hint")
+                    }
                 }
-                fail("Load failed: ${lastError?.message}.$hint")
             } catch (e: Exception) {
                 fail("Load failed: ${e.message}")
             }
@@ -458,14 +542,16 @@ object NpuEngine {
     fun unload() {
         scope.launch {
             inferenceLock.withLock {
-                vlm?.let { w ->
-                    runCatching { w.stopStream() }
-                    runCatching { w.destroy() }
+                lifecycleMutex.withLock {
+                    vlm?.let { w ->
+                        runCatching { w.stopStream() }
+                        runCatching { w.destroy() }
+                    }
+                    vlm = null
+                    lastProfile = null
+                    activity = null
+                    status = if (isBundleCached()) Status.DOWNLOADED else Status.NOT_DOWNLOADED
                 }
-                vlm = null
-                lastProfile = null
-                activity = null
-                status = if (isBundleCached()) Status.DOWNLOADED else Status.NOT_DOWNLOADED
             }
         }
     }
@@ -475,8 +561,11 @@ object NpuEngine {
     /**
      * Runs one stateless turn: the session is reset first, so each call sees
      * only [systemPrompt], [userPrompt] and [imagePaths]. Keeping turns
-     * independent matters on a fixed 4096-token context — an inspection shift
-     * would otherwise overflow it after a handful of photos.
+     * independent matters on the bundle's fixed context window — an inspection
+     * shift would otherwise overflow it after a handful of photos.
+     *
+     * If the session was released (idle/background unload) the cached bundle is
+     * made resident again first — [awaitResident] blocks until it is ready.
      *
      * [onToken] fires on a background thread for each decoded token.
      */
@@ -489,8 +578,9 @@ object NpuEngine {
         label: String? = null,
         onToken: (String) -> Unit = {},
     ): Result<String> {
-        val wrapper = vlm ?: return Result.failure(IllegalStateException("Model not loaded"))
+        awaitResident() ?: return Result.failure(IllegalStateException(notResidentReason()))
         return inferenceLock.withLock {
+            val w = vlm ?: return@withLock Result.failure(IllegalStateException("Model was unloaded — try again"))
             status = Status.BUSY
             activity = label
             try {
@@ -508,10 +598,11 @@ object NpuEngine {
                     add(userTurn)
                 }
                 withContext(Dispatchers.IO) {
-                    generate(wrapper, turns, userTurn, maxTokens, temperature, onToken)
+                    generate(w, turns, userTurn, maxTokens, temperature, onToken)
                 }
             } finally {
                 activity = null
+                lastUsedAt = SystemClock.elapsedRealtime()
                 if (status == Status.BUSY) status = Status.READY
             }
         }
@@ -520,11 +611,18 @@ object NpuEngine {
     /**
      * Multi-turn conversation. [turns] is the whole exchange including the new
      * user message; the caller owns the history and is responsible for keeping
-     * it inside [CONTEXT_TOKENS].
+     * it inside [effectiveContextTokens].
      *
      * [mediaTurn] is the single turn whose images are handed to the encoder —
      * normally the latest. The SDK tokenises media incrementally, so replaying
      * earlier turns' images desyncs the image markers against the bitmaps.
+     *
+     * Sliding-window attention stays armed: the caller trims history to the
+     * window, but if measurement drift ever lets a longer prompt through, the
+     * runtime evicts middle tokens past [SLIDING_N_KEEP] instead of failing
+     * the officer's chat outright. The stateless inspection path ([run]) keeps
+     * it off — its prompts are exactly budgeted and its OCR quality must not
+     * depend on eviction behaviour.
      */
     suspend fun converse(
         turns: List<VlmChatMessage>,
@@ -533,19 +631,59 @@ object NpuEngine {
         temperature: Float = 0.7f,
         onToken: (String) -> Unit = {},
     ): Result<String> {
-        val wrapper = vlm ?: return Result.failure(IllegalStateException("Model not loaded"))
+        awaitResident() ?: return Result.failure(IllegalStateException(notResidentReason()))
         return inferenceLock.withLock {
+            val w = vlm ?: return@withLock Result.failure(IllegalStateException("Model was unloaded — try again"))
             status = Status.BUSY
             activity = "Thinking"
             try {
                 withContext(Dispatchers.IO) {
-                    generate(wrapper, turns, mediaTurn, maxTokens, temperature, onToken)
+                    generate(
+                        w, turns, mediaTurn, maxTokens, temperature, onToken,
+                        slidingWindow = true, slidingWindowNKeep = SLIDING_N_KEEP,
+                    )
                 }
             } finally {
                 activity = null
+                lastUsedAt = SystemClock.elapsedRealtime()
                 if (status == Status.BUSY) status = Status.READY
             }
         }
+    }
+
+    /**
+     * Returns the resident wrapper, bringing the cached bundle back onto the
+     * NPU first if residency was released. Returns null — with [notResidentReason]
+     * explaining — when residency cannot be reached (nothing on disk, engine
+     * error, or a load that never finished).
+     */
+    private suspend fun awaitResident(): VlmWrapper? {
+        vlm?.let { return it }
+        when (status) {
+            Status.DOWNLOADED -> {
+                activity = "Waking the NPU"
+                load()
+            }
+            Status.LOADING, Status.READY, Status.BUSY -> Unit
+            else -> return null
+        }
+        val deadline = SystemClock.elapsedRealtime() + LOAD_WAIT_TIMEOUT_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            vlm?.let { return it }
+            // A load that ended in failure, or a bundle that went away (delete,
+            // cancelled download) will not become resident — stop waiting.
+            if (status != Status.LOADING && status != Status.READY && status != Status.BUSY) break
+            delay(250)
+        }
+        activity = null
+        return null
+    }
+
+    private fun notResidentReason(): String = when (status) {
+        Status.NOT_DOWNLOADED -> "Model bundle not on disk — install it from the On-device AI screen."
+        Status.DOWNLOADING -> "Model bundle is still downloading."
+        Status.ERROR -> lastError ?: "Engine error — retry from the On-device AI screen."
+        else -> "Model is not resident yet — try again shortly."
     }
 
     private suspend fun generate(
@@ -555,6 +693,8 @@ object NpuEngine {
         maxTokens: Int,
         temperature: Float,
         onToken: (String) -> Unit,
+        slidingWindow: Boolean = false,
+        slidingWindowNKeep: Int = 0,
     ): Result<String> {
         // The whole exchange is re-sent every call, so the session is cleared
         // first; otherwise the runtime would prepend its own copy of it.
@@ -566,6 +706,8 @@ object NpuEngine {
         val base = GenerationConfig(
             maxTokens = maxTokens,
             samplerConfig = SamplerConfig(temperature = temperature, topP = 0.9f, topK = 20),
+            slidingWindow = slidingWindow,
+            slidingWindowNKeep = slidingWindowNKeep,
         )
         val config = wrapper.injectMediaPathsToConfig(arrayOf(mediaTurn), base)
 
@@ -589,9 +731,77 @@ object NpuEngine {
         return failure?.let { Result.failure(it) } ?: Result.success(sb.toString())
     }
 
+    /**
+     * Reads the downloaded bundle's own `genie_config.json` and adopts its
+     * declared context window. A no-op when the bundle dir is unknown or the
+     * config is unreadable — the previous (or default) value stays in force,
+     * because a missing signal must never shrink the budgets mid-shift.
+     */
+    fun refreshBundleContext(modelDir: String?) {
+        val config = modelDir?.takeIf { it.isNotBlank() }
+            ?.let { File(it, BundleContext.GENIE_CONFIG_NAME) }
+            ?.takeIf { it.isFile }
+            ?.let { runCatching { it.readText() }.getOrNull() }
+            ?: return
+        bundleContextTokens = BundleContext.parseContextSize(config, fallback = bundleContextTokens)
+        contextFromBundle = true
+        Log.i(TAG, "bundle context window: $bundleContextTokens tokens")
+    }
+
     /** Aborts the in-flight generation; the coroutine unwinds via Completed. */
     fun stop() {
         scope.launch { runCatching { vlm?.stopStream() } }
+    }
+
+    // ------------------------------------------------- residency lifecycle
+
+    /**
+     * Called by the host activity when it stops being visible — app switch,
+     * screen off, home. Releases the session immediately rather than after a
+     * grace period: this ROM's fast_freezer parks a backgrounded process
+     * within ~10 s of losing the screen, so anything longer never runs while
+     * the user is actually away — it would fire on their return instead. The
+     * release queues behind any in-flight inference and the next use reloads
+     * the cached bundle on demand.
+     */
+    fun onHostBackgrounded() {
+        hostBackgrounded = true
+        if (isReady) {
+            Log.i(TAG, "host backgrounded — releasing the NPU session")
+            unload()
+        }
+        // A LOADING session cannot be cancelled mid-create; the commit check
+        // in load() rolls it back against this flag when it finishes.
+    }
+
+    /** Called by the host activity when it becomes visible again. */
+    fun onHostForegrounded() {
+        hostBackgrounded = false
+    }
+
+    /**
+     * Releases the session after [IDLE_UNLOAD_MS] without an inference, in the
+     * foreground as well — residency nobody is using is cDSP memory some other
+     * client (or our own next load) cannot get.
+     */
+    private fun startResidencyWatchdog() {
+        if (watchdogStarted) return
+        watchdogStarted = true
+        scope.launch {
+            while (true) {
+                delay(WATCHDOG_TICK_MS)
+                if (!isReady) continue
+                // Backgrounded residency is released on the first tick after
+                // it is observed — a safety net for any commit that raced the
+                // flag, so the window from issue #18 stays closed even if a
+                // future change reorders the load commit.
+                val idleMs = SystemClock.elapsedRealtime() - lastUsedAt
+                if (hostBackgrounded || idleMs >= IDLE_UNLOAD_MS) {
+                    Log.i(TAG, "releasing the NPU session (backgrounded=$hostBackgrounded, idle ${idleMs / 1000} s)")
+                    unload()
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------------- helpers
@@ -610,4 +820,20 @@ object NpuEngine {
 
     /** Multiplied by the attempt number, so gaps grow: 2 s, then 4 s. */
     private const val LOAD_RETRY_BACKOFF_MS = 2_000L
+
+    /** Idle time after which a resident session is released, freeing cDSP memory. */
+    private const val IDLE_UNLOAD_MS = 5 * 60 * 1000L
+
+    /** How long an inference caller waits for an on-demand reload to finish. */
+    private const val LOAD_WAIT_TIMEOUT_MS = 90 * 1000L
+
+    /** Watchdog polling period. */
+    private const val WATCHDOG_TICK_MS = 15_000L
+
+    /**
+     * Prompt prefix the sliding window always retains on the chat path: the
+     * system prompt plus the opening exchange. Covers ~70 tokens of system
+     * instruction with room to spare; everything past it is recency-kept.
+     */
+    private const val SLIDING_N_KEEP = 256
 }

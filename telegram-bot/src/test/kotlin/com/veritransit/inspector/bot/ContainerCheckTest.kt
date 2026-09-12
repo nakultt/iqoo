@@ -82,6 +82,17 @@ class ContainerCheckTest {
     }
 
     @Test
+    fun `over-count is reported as an overage, not normalized away`() {
+        val over = canonical.copy(
+            items = canonical.items.take(1).map { it.copy(found = it.expected + 2) } +
+                canonical.items.drop(1),
+        )
+        val report = ContainerCheck.containerReport(over, now = 12 * 60_000L)
+        assertTrue("⚠️ REVIEW" in report)
+        assertTrue("(overage)" in report, "overage line missing from report:\n$report")
+    }
+
+    @Test
     fun `html is escaped in user echoed text`() {
         assertEquals("a &lt;b&gt; &amp; c", Html.esc("a <b> & c"))
     }

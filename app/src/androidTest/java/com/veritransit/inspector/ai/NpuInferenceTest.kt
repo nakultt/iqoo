@@ -42,14 +42,23 @@ class NpuInferenceTest {
         Log.i(TAG, "bill reading: ${reading.getOrNull()}")
         val bill = reading.getOrThrow()
 
-        // The fixture prints EWB-7819-2044-8831 on a TN 38 BX 4491 Tata 407.
-        // Only the header is asserted: see readEwayBill's note on why the
-        // line-item table is best-effort at this encoder's resolution.
-        assertTrue("no usable fields read", bill.usable)
-        assertTrue("EWB number missed: '${bill.ewb}'", bill.ewb.contains("7819"))
-        assertTrue("vehicle missed: '${bill.vehicle}'", bill.vehicle.replace(" ", "").contains("4491"))
-        Log.i(TAG, "line items read: ${bill.items.size}")
-        Log.i(TAG, "profile: ${NpuEngine.lastProfile}")
+        // The fixture prints EWB-7819-2044-8831 on a TN 38 BX 4491 Tata 407,
+        // dispatched from Chennai — and no goods table (header-only bill), so
+        // the honest OCR result is populated header fields and no line items.
+        assertTrue("model judged the fixture illegible", bill.legible)
+        val ewbDigits = bill.ewb.filter { it.isDigit() }
+        assertTrue(
+            "EWB number missed: '${bill.ewb}'",
+            listOf("7819", "2044", "8831").all { it in ewbDigits },
+        )
+        val vehicle = bill.vehicle.replace(" ", "").uppercase()
+        assertTrue("vehicle number missed: '${bill.vehicle}'", vehicle.contains("TN38BX") && vehicle.contains("4491"))
+        assertTrue("vehicle model missed: '${bill.vehicleModel}'", bill.vehicleModel.contains("Tata", ignoreCase = true))
+        // The fixture prints no goods rows, so a populated items list means
+        // the model invented them — exactly the hallucination a record must
+        // never inherit.
+        assertTrue("model invented goods rows on a header-only bill: ${bill.items}", bill.items.isEmpty())
+        Log.i(TAG, "origin read as: '${bill.origin}'")
     }
 
     @Test
@@ -70,11 +79,32 @@ class NpuInferenceTest {
             ref = "#8831",
         )
         val scan = InspectorAi.reconcileCargo(croppedSample().absolutePath, manifest).getOrThrow()
-        Log.i(TAG, "reconciliation: ${scan.items}, observation='${scan.observation}'")
+        Log.i(TAG, "reconciliation: ${scan.items}, observation='${scan.observation}', conf=${scan.confidence}")
 
         // Every declared line must come back, whatever the photo showed — the
         // mapping is re-keyed against the manifest so nothing can be dropped.
         assertTrue("declared lines lost", scan.items.count { it.expected > 0 } == manifest.items.size)
+
+        // The fixture is a photograph of a paper bill, not a loaded bay: the
+        // counts are the model's word, but they must stay inside the scale the
+        // prompt demands, and the observation must actually describe something.
+        assertTrue(
+            "counts outside 0..99: ${scan.items.map { it.found }}",
+            scan.items.all { it.found in 0..99 },
+        )
+        assertTrue(
+            "confidence outside 0..1: ${scan.confidence}",
+            scan.confidence in 0f..1f,
+        )
+        assertTrue("empty observation", scan.observation.isNotBlank())
+        // The fixture is a paper bill, not a loaded bay: whatever the model
+        // lists as unlisted must never include the declared lines themselves.
+        val unlistedNames = scan.items.filter { it.expected == 0 }.map { it.name }
+        assertTrue(
+            "declared item reappeared as unlisted: $unlistedNames",
+            unlistedNames.none { u -> manifest.items.any { it.name.equals(u, ignoreCase = true) } },
+        )
+        Log.i(TAG, "unlisted read: ${scan.items.filter { it.expected == 0 }}")
     }
 
     @Test
@@ -94,13 +124,21 @@ class NpuInferenceTest {
             items = listOf(
                 CargoItem("Dell UltraSharp 27\" Monitor", "Factory Boxed", 3, 3),
                 CargoItem("Logitech Mechanical Keyboard", "Bulk Carton", 4, 3),
+                // Exercises the overage branch of the remarks prompt: declared
+                // 2, seen 5 must reach the note as an over-count, not vanish.
                 CargoItem("Thermal POS Printer", "Not on manifest", 0, 1),
+                CargoItem("HDMI Cable", "Bulk Carton", 2, 5),
             ),
         )
         val note = InspectorAi.draftNote(record).getOrThrow()
         Log.i(TAG, "drafted note: $note")
         assertTrue("empty note", note.length > 20)
         assertTrue("not prose", note.contains(" "))
+        assertTrue(
+            "note dropped the overage: $note",
+            note.contains("HDMI", ignoreCase = true) || note.contains("over", ignoreCase = true) ||
+                note.contains("five", ignoreCase = true) || note.contains("5", ignoreCase = true),
+        )
     }
 
     private fun croppedSample(): File {

@@ -130,6 +130,11 @@ dependencies {
     // into the app's private files dir — never bundled in the APK.
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.29.0")
 
+    // JVM-side unit tests for the pure logic (reconciliation mapping, status
+    // derivation, bill-reading confidence parsing) — these run in CI without
+    // a device or the model bundle.
+    testImplementation(kotlin("test"))
+
     // Instrumented checks for the NPU path — they need a real Hexagon, so they
     // only run on a device with the bundle already pulled.
     androidTestImplementation("androidx.test:runner:1.6.2")

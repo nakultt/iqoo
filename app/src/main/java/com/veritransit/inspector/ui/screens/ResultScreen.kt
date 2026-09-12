@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -274,11 +275,20 @@ private fun Banner(record: InspectionRecord) {
                 }
                 Spacer(Modifier.weight(1f))
                 if (record.confidence > 0f) {
+                    val low = record.confidence < 0.5f
                     Text(
                         "Conf. ${(record.confidence * 100).format1()}%",
                         style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.SemiBold, fontSize = 12.sp),
-                        color = VT.Slate,
+                        color = if (low) VT.Amber else VT.Slate,
                     )
+                    if (low) {
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "LOW — VERIFY MANUALLY",
+                            style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Bold, fontSize = 10.sp, letterSpacing = 0.08.sp),
+                            color = VT.Amber,
+                        )
+                    }
                 }
             }
             Spacer(Modifier.height(10.dp))
@@ -332,6 +342,7 @@ private fun ReconciliationCard(record: InspectionRecord) {
                     when (item.status) {
                         ItemStatus.MATCHED -> MatchBadge()
                         ItemStatus.SHORTAGE -> StatusChip("Shortage (-${item.expected - item.found})", VT.AmberBg, VT.Amber, VT.AmberLine, withDot = false)
+                        ItemStatus.OVERAGE -> StatusChip("Overage (+${item.found - item.expected})", VT.AmberBg, VT.Amber, VT.AmberLine, withDot = false)
                         ItemStatus.UNLISTED -> StatusChip("Unlisted (+${item.found})", VT.CrimsonBg, VT.Crimson, VT.CrimsonLine, withDot = false)
                     }
                 }
@@ -366,6 +377,7 @@ private fun evidenceBoxes(record: InspectionRecord): List<Bounds> {
     record.items.forEach { item ->
         when (item.status) {
             ItemStatus.SHORTAGE -> boxes += Bounds(0.70f, 0.32f, 0.24f, 0.32f, Color(0xFFF59E0B), "-${item.expected - item.found}")
+            ItemStatus.OVERAGE -> boxes += Bounds(0.70f, 0.32f, 0.24f, 0.32f, Color(0xFFF59E0B), "+${item.found - item.expected}")
             ItemStatus.UNLISTED -> boxes += Bounds(0.42f, 0.55f, 0.26f, 0.30f, Color(0xFFF43F5E), "NEW")
             else -> Unit
         }

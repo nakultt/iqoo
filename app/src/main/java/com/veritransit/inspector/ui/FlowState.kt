@@ -11,6 +11,9 @@ import com.veritransit.inspector.data.OfficerAction
 import com.veritransit.inspector.data.Verdict
 import kotlin.random.Random
 
+/** Per-section self-assessment of a bill reading; null section = not reported. */
+data class BillSections(val header: Float?, val route: Float?, val items: Float?)
+
 /** Mutable state for one active inspection walkthrough. */
 class InspectionFlowState {
     var detected by mutableStateOf(false)
@@ -39,6 +42,13 @@ class InspectionFlowState {
     /** Confidence the model reported on the reconciliation, 0 when not used. */
     var aiConfidence by mutableStateOf(0f)
 
+    /**
+     * Per-section self-assessment of the bill reading (header / route /
+     * items), null section = not reported. Null overall on the demo and
+     * manual paths — markers only ever reflect what the model actually said.
+     */
+    var billSections by mutableStateOf<BillSections?>(null)
+
     var action by mutableStateOf(OfficerAction.RECOUNT)
     var note by mutableStateOf("")
 
@@ -53,7 +63,9 @@ class InspectionFlowState {
         confidenceVal = when {
             // The model reports its own confidence on the reconciliation; use it
             // rather than inventing one, so the figure on the record is real.
-            reported > 0f -> reported.coerceIn(0.5f, 0.999f)
+            // Values below 0.5 are kept as-is: a low number is the model saying
+            // "check this yourself", and flooring it would manufacture trust.
+            reported > 0f -> reported.coerceIn(0f, 0.999f)
             flagged -> 0.88f + Random.nextFloat() * 0.07f
             else -> 0.955f + Random.nextFloat() * 0.04f
         }
@@ -102,6 +114,7 @@ class InspectionFlowState {
         driverOk = false
         billEvidence = null
         manifestFromAi = false
+        billSections = null
         resetForScan()
     }
 

@@ -22,9 +22,9 @@ import kotlinx.serialization.json.Json
  * brace, and a malformed reply must degrade to "AI unavailable" rather than
  * crash an officer's inspection mid-shift.
  *
- * Token budgets are sized against [NpuEngine.CONTEXT_TOKENS], not the 4096 the
- * model supports off-device: the AI Hub bundle is compiled to a 2048 context,
- * and an evidence photo already spends ~256 of it.
+ * Token budgets are sized against [NpuEngine.effectiveContextTokens], not the
+ * 4096 the model supports off-device: the AI Hub bundle is compiled to a 2048
+ * context, and an evidence photo already spends ~256 of it.
  */
 object InspectorAi {
 
@@ -54,6 +54,12 @@ object InspectorAi {
         @SerialName("distance_km") val distanceKm: Int = 0,
         val items: List<BillItem> = emptyList(),
         val legible: Boolean = true,
+        // Per-section self-assessments, normalised through
+        // [normaliseSectionConfidence]: null means the model did not report
+        // one (older replies, or a value too garbled to trust).
+        @SerialName("header_confidence") val headerConfidence: Float? = null,
+        @SerialName("route_confidence") val routeConfidence: Float? = null,
+        @SerialName("items_confidence") val itemsConfidence: Float? = null,
     ) {
         val route: String
             get() = when {
@@ -113,6 +119,12 @@ object InspectorAi {
           items         - an array with one object per printed goods row,
                           each having the keys name, packaging, quantity
           legible       - true, or false if the document cannot be read
+          header_confidence - how sure you are of the bill number and
+                              vehicle number, between 0 and 1
+          route_confidence  - how sure you are of origin, destination
+                              and distance, between 0 and 1
+          items_confidence  - how sure you are of the goods rows,
+                              between 0 and 1
 
         Copy the values off the document. Use "" for any text field that is not
         printed, 0 for a missing number, and [] if no goods rows are printed.
@@ -138,9 +150,44 @@ object InspectorAi {
             maxTokens = 512,
             temperature = 0.1f,
             label = "Reading E-Way Bill",
-        ).mapCatching { raw ->
-            json.decodeFromString<BillReading>(extractJsonObject(raw))
-        }
+        ).mapCatching { raw -> parseBillReading(raw) }
+
+    /**
+     * Decodes a raw model reply into a [BillReading], normalising the
+     * per-section confidences on the way in. Internal so the JVM test suite
+     * can exercise the exact parsing path the device run takes.
+     */
+    internal fun parseBillReading(raw: String): BillReading {
+        val parsed = json.decodeFromString<BillReading>(extractJsonObject(raw))
+        return parsed.copy(
+            headerConfidence = normaliseSectionConfidence(parsed.headerConfidence),
+            routeConfidence = normaliseSectionConfidence(parsed.routeConfidence),
+            itemsConfidence = normaliseSectionConfidence(parsed.itemsConfidence),
+        )
+    }
+
+    /**
+     * Normalises one self-reported section confidence. The prompt asks for
+     * 0..1; a quantised model sometimes answers in percent (rescaled) or
+     * produces garbage. Garbage becomes null — *not reported* — because a
+     * missing signal must never be turned into a false all-clear, and
+     * inventing a low value would cry wolf on every reply.
+     */
+    internal fun normaliseSectionConfidence(raw: Float?): Float? = when {
+        raw == null || raw < 0f || raw > 100f -> null
+        raw <= 1f -> raw
+        else -> (raw / 100f).coerceIn(0f, 1f)
+    }
+
+    /** Below this a section carries an amber verify-manually marker. */
+    const val LOW_SECTION_CONFIDENCE = 0.5f
+
+    /** The sections of [BillReading] whose reported confidence is low enough to flag. */
+    internal fun lowConfidenceSections(reading: BillReading): List<String> = buildList {
+        if ((reading.headerConfidence ?: 1f) < LOW_SECTION_CONFIDENCE) add("header")
+        if ((reading.routeConfidence ?: 1f) < LOW_SECTION_CONFIDENCE) add("route")
+        if ((reading.itemsConfidence ?: 1f) < LOW_SECTION_CONFIDENCE) add("items")
+    }
 
     // --------------------------------------------------- cargo reconciliation
 
@@ -214,20 +261,39 @@ object InspectorAi {
             label = "Reconciling cargo",
         ).mapCatching { raw ->
             val parsed = json.decodeFromString<Reconciliation>(extractJsonObject(raw))
-            val counted = parsed.items.associateBy { normalise(it.name) }
-            val declaredLines = manifest.items.map { item ->
-                val found = counted[normalise(item.name)]?.found?.coerceAtLeast(0) ?: 0
-                item.copy(found = found.coerceAtMost(item.expected))
-            }
-            val extras = parsed.unlisted
-                .filterNot { isSchemaEcho(it.name) }
-                .map { CargoItem(it.name, "Not on manifest", 0, it.count.coerceAtLeast(1)) }
-            CargoScan(
-                items = declaredLines + extras,
-                observation = parsed.observation.trim(),
-                confidence = parsed.confidence.coerceIn(0f, 1f),
-            )
+            applyReconciliation(parsed, manifest)
         }
+    }
+
+    /**
+     * Re-keys the model's counts against the manifest. Declared lines come
+     * back with whatever count the model reported — including counts **above**
+     * the declared quantity, because an overage is a discrepancy the officer
+     * needs on the record, not something to clamp into a clean pass.
+     */
+    internal fun applyReconciliation(parsed: Reconciliation, manifest: Manifest): CargoScan {
+        val counted = parsed.items.associateBy { normalise(it.name) }
+        val declaredLines = manifest.items.map { item ->
+            val found = counted[normalise(item.name)]?.found?.coerceAtLeast(0) ?: 0
+            item.copy(found = found)
+        }
+        val extras = parsed.unlisted
+            .filterNot { isSchemaEcho(it.name) }
+            .map { CargoItem(it.name, "Not on manifest", 0, it.count.coerceAtLeast(1)) }
+        return CargoScan(
+            items = declaredLines + extras,
+            observation = parsed.observation.trim(),
+            confidence = normaliseConfidence(parsed.confidence),
+        )
+    }
+
+    /**
+     * The prompt asks for 0..1, but a quantised model sometimes answers in
+     * percent; rescale that instead of clamping it up to a manufactured 100%.
+     */
+    internal fun normaliseConfidence(raw: Float): Float {
+        val c = raw.coerceAtLeast(0f)
+        return if (c <= 1f) c else (c / 100f).coerceIn(0f, 1f)
     }
 
     // ------------------------------------------------------ verdict drafting
@@ -248,6 +314,7 @@ object InspectorAi {
             when (item.status) {
                 ItemStatus.MATCHED -> "- ${item.name}: declared ${item.expected}, found ${item.found} (matches)"
                 ItemStatus.SHORTAGE -> "- ${item.name}: declared ${item.expected}, found ${item.found} (short by ${item.expected - item.found})"
+                ItemStatus.OVERAGE -> "- ${item.name}: declared ${item.expected}, found ${item.found} (over by ${item.found - item.expected})"
                 ItemStatus.UNLISTED -> "- ${item.name}: not declared, ${item.found} observed"
             }
         }

@@ -84,6 +84,7 @@ import com.veritransit.inspector.ai.InspectorAi
 import com.veritransit.inspector.ai.NpuEngine
 import com.veritransit.inspector.data.Manifest
 import com.veritransit.inspector.data.Presets
+import com.veritransit.inspector.ui.BillSections
 import com.veritransit.inspector.ui.InspectionFlowState
 import com.veritransit.inspector.ui.components.FieldLabel
 import com.veritransit.inspector.ui.components.FlowHeader
@@ -253,13 +254,28 @@ private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedba
                 flow.billEvidence = frame.absolutePath
                 InspectorAi.readEwayBill(frame.absolutePath)
                     .onSuccess { bill ->
-                        if (bill.usable) {
-                            flow.manifest = bill.toManifest()
-                            flow.manifestFromAi = true
-                            if (hapticsEnabled) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                            flow.detected = true
-                        } else {
-                            readError = "Nothing legible in frame — fill it with the bill and hold steady."
+                        when {
+                            // The model judged the document unreadable. However
+                            // many fields squeaked out, trusting them would
+                            // build a manifest off a misread — reject and have
+                            // the officer retake or enter it manually.
+                            !bill.legible ->
+                                readError =
+                                    "This bill could not be read clearly enough to trust — " +
+                                        "retake it in better light or enter the manifest manually."
+                            bill.usable -> {
+                                flow.manifest = bill.toManifest()
+                                flow.manifestFromAi = true
+                                flow.billSections = BillSections(
+                                    header = bill.headerConfidence,
+                                    route = bill.routeConfidence,
+                                    items = bill.itemsConfidence,
+                                )
+                                if (hapticsEnabled) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                flow.detected = true
+                            }
+                            else ->
+                                readError = "Nothing legible in frame — fill it with the bill and hold steady."
                         }
                     }
                     .onFailure { readError = it.message ?: "The model could not parse that document." }
@@ -608,6 +624,9 @@ private fun ManualEntry(flow: InspectionFlowState, feedback: (String) -> Unit) {
                         items = p.items,
                         ref = "#" + ewb.filter { it.isDigit() }.take(4) + "-A",
                     )
+                    // Manual entry: any confidence markers from an earlier
+                    // on-device read in this flow no longer apply.
+                    flow.billSections = null
                     flow.detected = true
                     feedback("Manifest drafted from manual entry")
                 }

@@ -314,11 +314,17 @@ fun PulseDot(color: Color, size: Dp = 8.dp) {
         label = "pulseA",
     )
     Box(contentAlignment = Alignment.Center) {
+        // The halo scales on the draw layer only — a layout-affecting size here
+        // re-measures the host row every frame and jitters everything beside it.
         Box(
             Modifier
-                .size(size * pulse)
+                .size(size)
+                .graphicsLayer {
+                    scaleX = pulse
+                    scaleY = pulse
+                    this.alpha = alpha
+                }
                 .clip(CircleShape)
-                .graphicsLayer { this.alpha = alpha }
                 .background(color)
         )
         Box(Modifier.size(size).clip(CircleShape).background(color))
