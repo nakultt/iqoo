@@ -87,6 +87,10 @@ fun PackingListScreen(
                 supplierLow = (sections?.supplier ?: 1f) < ReceivingAi.LOW_SECTION_CONFIDENCE,
             )
 
+            if (flow.labelResolved) {
+                NoticeStrip(text = com.veritransit.inspector.data.QrLabel.HEADERS_ONLY)
+            }
+
             Column {
                 SectionLabel(
                     "Packed Lines",

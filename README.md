@@ -31,6 +31,25 @@ JetBrains Mono for machine-verified values.
 | Receipts | Searchable/filterable goods-received log with flagged-delivery card |
 | Settings | Warehouse & receiver identity, sound & haptic feedback, app info |
 
+## Consignment documents (reference)
+
+Which papers an electronics or fabric consignment carries — legally required
+versus commercially customary, the clocks they start, and how far each rule's
+wording has been checked — is encoded as data in
+[`data/documents/`](app/src/main/java/com/veritransit/inspector/data/documents/)
+and written out in [docs/CONSIGNMENT_DOCUMENTS.md](docs/CONSIGNMENT_DOCUMENTS.md)
+(first cut of #27, Tamil Nadu scope). It is reference data for the receiving
+team, within the non-goal above: the app does not verify these documents or
+state a legal position.
+
+> [!IMPORTANT]
+> **QR ingestion yields headers only — never line items.** The carton-label scan
+> (`QrLabel`) extracts a PO and a packing-list reference and nothing else; even a
+> signed e-invoice QR carries only header fields (GSTINs, document number and
+> date, total value, the *count* of lines, the main HSN, the IRN). Packed lines
+> always come from a document read or manual entry, confirmed on the Packing
+> List step.
+
 ## On-device AI (Snapdragon NPU)
 
 Vision and language run locally on the Hexagon NPU via the **Qualcomm GenieX

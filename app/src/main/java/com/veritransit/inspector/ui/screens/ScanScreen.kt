@@ -592,6 +592,12 @@ private fun DetectedCard(flow: ReceivingFlowState) {
                         }
                     }
                 }
+                // On a label scan the supplier and lines above are the preset's,
+                // not the code's — say so where they are shown.
+                if (flow.labelResolved) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(QrLabel.HEADERS_ONLY, style = MaterialTheme.typography.bodySmall, color = VT.Muted)
+                }
             }
         }
     }

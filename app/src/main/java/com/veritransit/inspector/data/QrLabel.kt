@@ -30,6 +30,17 @@ data class QrLabelFields(
 object QrLabel {
 
     /**
+     * What a scanned code cannot tell the app (#27). [parse] takes a PO and a
+     * packing-list reference and nothing else, and even a signed e-invoice QR
+     * carries header fields only — GSTINs, document number and date, total
+     * value, the *count* of lines, the main HSN, the IRN — never the goods
+     * lines. Shown wherever a label scan resolved the packing list, so the
+     * preset lines beside it are never mistaken for something the code said.
+     */
+    const val HEADERS_ONLY =
+        "The label gave references only — never the goods lines. Confirm each packed line against the paperwork."
+
+    /**
      * Purchase-order reference: `PO-2025-4471`, `PO20254471`, or a bare
      * `PO` followed by at least four digits. Boundaries keep it from matching
      * inside a longer alphanumeric blob.
