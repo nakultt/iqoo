@@ -2,6 +2,7 @@ package com.veritransit.inspector.ai
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 
 /**
  * JVM-side checks for the context-window sizing — the exact parse path
@@ -65,5 +66,32 @@ class BundleContextTest {
     @Test
     fun `prompt budget never collapses to zero`() {
         assertEquals(BundleContext.MIN_PROMPT_BUDGET, BundleContext.promptBudget(512, 512))
+    }
+
+    @Test
+    fun `nullable parse distinguishes a declaration from a fallback`() {
+        // The provenance signal behind contextFromBundle: a declared size and
+        // the default must not be indistinguishable when the declared size IS
+        // the default.
+        assertEquals(2048, BundleContext.parseContextSizeOrNull(configWith("2048")))
+        assertEquals(4096, BundleContext.parseContextSizeOrNull(configWith("4096")))
+    }
+
+    @Test
+    fun `nullable parse yields null, not the default, on anything unreadable`() {
+        assertNull(BundleContext.parseContextSizeOrNull("not json at all {{{"))
+        assertNull(BundleContext.parseContextSizeOrNull("""{"dialog": {}}"""))
+        assertNull(BundleContext.parseContextSizeOrNull(configWith("0")))
+        assertNull(BundleContext.parseContextSizeOrNull(configWith("-2048")))
+        assertNull(BundleContext.parseContextSizeOrNull(configWith("1048576")))
+        assertNull(BundleContext.parseContextSizeOrNull(configWith("20.48")))
+    }
+
+    @Test
+    fun `string-typed integers are accepted by content, like the runtime path always did`() {
+        // kotlinx intOrNull parses the primitive's content: "2048" (quoted) is
+        // a valid declaration. Documented here so the leniency is a decision,
+        // not an accident.
+        assertEquals(2048, BundleContext.parseContextSizeOrNull(configWith("\"2048\"")))
     }
 }
