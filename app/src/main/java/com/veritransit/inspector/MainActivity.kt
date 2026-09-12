@@ -29,4 +29,12 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    override fun onStop() {
+        super.onStop()
+        // Releases the cDSP memory while nothing can use it (this ROM freezes
+        // backgrounded processes anyway); the next inference reloads the
+        // cached bundle on demand.
+        NpuEngine.onHostBackgrounded()
+    }
 }
