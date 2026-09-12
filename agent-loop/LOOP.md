@@ -80,12 +80,11 @@ Run after the worker in each cycle. For each open PR authored by the worker:
 
 ## Merge rule
 
-A PR may be merged (squash) only when: the critic has approved it
-(`critic:approved`), the worker's own verification run was green, and the PR
-does not touch files claimed by an in-flight branch. The merger re-runs the
-fast unit-test command before merging. If a device-dependent claim is involved,
-note it in the issue — device runs are performed when hardware is available,
-never assumed.
+**Agents never merge.** The maintainer merges. A PR is *ready* for the
+maintainer when: the critic has approved it (`critic:approved`), the worker's
+own verification run was green, and it does not touch files claimed by an
+in-flight branch. If device-dependent claims are involved, note them in the
+issue — device runs are performed when hardware is available, never assumed.
 
 ## Issue hygiene
 
