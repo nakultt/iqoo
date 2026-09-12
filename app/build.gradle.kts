@@ -94,8 +94,9 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:1.4.2")
     implementation("androidx.camera:camera-view:1.4.2")
 
-    // JVM-side unit tests for the bill-reading confidence parsing — these run
-    // in CI without a device or the model bundle.
+    // JVM-side unit tests for the pure logic (reconciliation mapping, status
+    // derivation, bill-reading confidence parsing) — these run in CI without
+    // a device or the model bundle.
     testImplementation(kotlin("test"))
 
     // Instrumented checks for the NPU path — they need a real Hexagon, so they

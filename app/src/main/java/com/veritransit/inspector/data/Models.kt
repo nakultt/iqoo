@@ -2,7 +2,7 @@ package com.veritransit.inspector.data
 
 enum class Verdict { PASSED, REVIEW, PENDING }
 
-enum class ItemStatus { MATCHED, SHORTAGE, UNLISTED }
+enum class ItemStatus { MATCHED, SHORTAGE, OVERAGE, UNLISTED }
 
 data class CargoItem(
     val name: String,
@@ -12,7 +12,12 @@ data class CargoItem(
 ) {
     val status: ItemStatus
         get() = when {
-            found > expected -> ItemStatus.UNLISTED
+            // An extra with no declared line carries no expectation to exceed:
+            // it is goods the manifest never mentioned at all.
+            expected <= 0 && found > 0 -> ItemStatus.UNLISTED
+            // Declared but found in greater number — an overage is a manifest
+            // mismatch exactly like a shortage, and must survive to the record.
+            found > expected -> ItemStatus.OVERAGE
             found < expected -> ItemStatus.SHORTAGE
             else -> ItemStatus.MATCHED
         }

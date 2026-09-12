@@ -256,20 +256,39 @@ object InspectorAi {
             label = "Reconciling cargo",
         ).mapCatching { raw ->
             val parsed = json.decodeFromString<Reconciliation>(extractJsonObject(raw))
-            val counted = parsed.items.associateBy { normalise(it.name) }
-            val declaredLines = manifest.items.map { item ->
-                val found = counted[normalise(item.name)]?.found?.coerceAtLeast(0) ?: 0
-                item.copy(found = found.coerceAtMost(item.expected))
-            }
-            val extras = parsed.unlisted
-                .filterNot { isSchemaEcho(it.name) }
-                .map { CargoItem(it.name, "Not on manifest", 0, it.count.coerceAtLeast(1)) }
-            CargoScan(
-                items = declaredLines + extras,
-                observation = parsed.observation.trim(),
-                confidence = parsed.confidence.coerceIn(0f, 1f),
-            )
+            applyReconciliation(parsed, manifest)
         }
+    }
+
+    /**
+     * Re-keys the model's counts against the manifest. Declared lines come
+     * back with whatever count the model reported — including counts **above**
+     * the declared quantity, because an overage is a discrepancy the officer
+     * needs on the record, not something to clamp into a clean pass.
+     */
+    internal fun applyReconciliation(parsed: Reconciliation, manifest: Manifest): CargoScan {
+        val counted = parsed.items.associateBy { normalise(it.name) }
+        val declaredLines = manifest.items.map { item ->
+            val found = counted[normalise(item.name)]?.found?.coerceAtLeast(0) ?: 0
+            item.copy(found = found)
+        }
+        val extras = parsed.unlisted
+            .filterNot { isSchemaEcho(it.name) }
+            .map { CargoItem(it.name, "Not on manifest", 0, it.count.coerceAtLeast(1)) }
+        return CargoScan(
+            items = declaredLines + extras,
+            observation = parsed.observation.trim(),
+            confidence = normaliseConfidence(parsed.confidence),
+        )
+    }
+
+    /**
+     * The prompt asks for 0..1, but a quantised model sometimes answers in
+     * percent; rescale that instead of clamping it up to a manufactured 100%.
+     */
+    internal fun normaliseConfidence(raw: Float): Float {
+        val c = raw.coerceAtLeast(0f)
+        return if (c <= 1f) c else (c / 100f).coerceIn(0f, 1f)
     }
 
     // ------------------------------------------------------ verdict drafting
@@ -290,6 +309,7 @@ object InspectorAi {
             when (item.status) {
                 ItemStatus.MATCHED -> "- ${item.name}: declared ${item.expected}, found ${item.found} (matches)"
                 ItemStatus.SHORTAGE -> "- ${item.name}: declared ${item.expected}, found ${item.found} (short by ${item.expected - item.found})"
+                ItemStatus.OVERAGE -> "- ${item.name}: declared ${item.expected}, found ${item.found} (over by ${item.found - item.expected})"
                 ItemStatus.UNLISTED -> "- ${item.name}: not declared, ${item.found} observed"
             }
         }
