@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Remove
@@ -287,6 +288,7 @@ private fun ScanRow(item: CargoItem, index: Int) {
     val bg by animateColorAsState(
         when (status) {
             ItemStatus.UNLISTED -> Color(0xFFFDF3F3)
+            ItemStatus.OVERAGE -> Color(0xFFFBF3DF)
             else -> VT.Surface
         },
         tween(240), label = "rowBg",
@@ -308,6 +310,7 @@ private fun ScanRow(item: CargoItem, index: Int) {
                         when (status) {
                             ItemStatus.MATCHED -> VT.EmeraldBg
                             ItemStatus.SHORTAGE -> VT.AmberBg
+                            ItemStatus.OVERAGE -> VT.AmberBg
                             ItemStatus.UNLISTED -> VT.CrimsonBg
                         }
                     ),
@@ -317,12 +320,14 @@ private fun ScanRow(item: CargoItem, index: Int) {
                     when (status) {
                         ItemStatus.MATCHED -> Icons.Rounded.Check
                         ItemStatus.SHORTAGE -> Icons.Rounded.Remove
+                        ItemStatus.OVERAGE -> Icons.Rounded.Add
                         ItemStatus.UNLISTED -> Icons.Rounded.Close
                     },
                     null,
                     tint = when (status) {
                         ItemStatus.MATCHED -> VT.Emerald
                         ItemStatus.SHORTAGE -> VT.AmberDot
+                        ItemStatus.OVERAGE -> VT.AmberDot
                         ItemStatus.UNLISTED -> VT.Crimson
                     },
                     modifier = Modifier.size(17.dp),
@@ -344,6 +349,7 @@ fun StatusPill(status: ItemStatus, expected: Int, found: Int, modifier: Modifier
     val (bg, fg, line, label) = when (status) {
         ItemStatus.MATCHED -> Quadruple(VT.EmeraldBg, VT.Emerald, VT.EmeraldLine, "Matched")
         ItemStatus.SHORTAGE -> Quadruple(VT.AmberBg, VT.Amber, VT.AmberLine, "Shortage (-${expected - found})")
+        ItemStatus.OVERAGE -> Quadruple(VT.AmberBg, VT.Amber, VT.AmberLine, "Overage (+${found - expected})")
         ItemStatus.UNLISTED -> Quadruple(VT.CrimsonBg, VT.Crimson, VT.CrimsonLine, "Unlisted (+$found)")
     }
     Box(

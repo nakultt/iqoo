@@ -281,6 +281,7 @@ private fun AuditCard(
                         Text(item.name, style = MaterialTheme.typography.bodyMedium, color = VT.Slate, modifier = Modifier.weight(1f))
                         when (item.status) {
                             ItemStatus.SHORTAGE -> StatusChip("-${item.expected - item.found} Shortage", VT.CrimsonBg, VT.Crimson, VT.CrimsonLine, withDot = false)
+                            ItemStatus.OVERAGE -> StatusChip("+${item.found - item.expected} Overage", VT.AmberBg, VT.Amber, VT.AmberLine, withDot = false)
                             else -> StatusChip("+${item.found} Unlisted", VT.AmberBg, VT.Amber, VT.AmberLine, withDot = false)
                         }
                     }
