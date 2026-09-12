@@ -31,6 +31,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.io.File
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
@@ -102,11 +103,31 @@ object NpuEngine {
     /**
      * Context the bundle was compiled with, from its own `genie_config.json`
      * (`dialog.context.size`). Fixed at compile time — the runtime cannot widen
-     * it — and one photo already costs ~256 of it, so prompts and `maxTokens`
-     * are budgeted against this rather than against the 4096 the model supports
-     * off-device.
+     * it (`ModelConfig.nCtx` must stay 0) — and one photo already costs ~256 of
+     * it, so prompts and `maxTokens` are budgeted against [bundleContextTokens]
+     * rather than against the 4096 the model supports off-device.
+     *
+     * This constant is the fallback assumed until the downloaded bundle has
+     * been read; [refreshBundleContext] replaces the effective value with the
+     * bundle's own declaration, so a future bundle compiled with a larger
+     * window is used to the full automatically.
      */
-    const val CONTEXT_TOKENS = 2048
+    const val CONTEXT_TOKENS = BundleContext.DEFAULT_CONTEXT_TOKENS
+
+    /**
+     * Context window currently in force, read from the downloaded bundle when
+     * available. Observed as Compose state so the On-device AI screen shows
+     * the number the budgets actually run against.
+     */
+    var bundleContextTokens by mutableStateOf(CONTEXT_TOKENS)
+        private set
+
+    /** Whether [bundleContextTokens] came from the bundle rather than [CONTEXT_TOKENS]. */
+    var contextFromBundle by mutableStateOf(false)
+        private set
+
+    /** Window every prompt budget ([ChatSession], [InspectorAi]) must fit. */
+    val effectiveContextTokens: Int get() = bundleContextTokens
 
     enum class Status {
         /** Nothing attempted yet. */
@@ -204,7 +225,13 @@ object NpuEngine {
                 }
                 probeCatalog()
                 Log.i(TAG, "GenieX up, chipset=$chipset, hub model=$hubModelName")
-                status = if (isBundleCached()) Status.DOWNLOADED else Status.NOT_DOWNLOADED
+                val cached = isBundleCached()
+                if (cached) {
+                    // The bundle is already on disk: learn its real context
+                    // window now so every budget below runs against it.
+                    refreshBundleContext(runCatching { ModelManagerWrapper.getPaths(hubModelName)?.model_dir }.getOrNull())
+                }
+                status = if (cached) Status.DOWNLOADED else Status.NOT_DOWNLOADED
             } catch (e: Exception) {
                 fail("GenieX init failed: ${e.message}")
             }
@@ -396,6 +423,9 @@ object NpuEngine {
                         lastError = "Model bundle not on disk — download it first."
                         return@withLock
                     }
+                    // The on-disk bundle is the authority on the context window:
+                    // re-read it on every load in case a re-pull changed it.
+                    refreshBundleContext(paths.model_dir)
                     // The bundle's manifest names the runtime it was compiled for.
                     // Anything but qairt means we pulled a GGUF by mistake and would
                     // silently land on the CPU.
@@ -510,8 +540,8 @@ object NpuEngine {
     /**
      * Runs one stateless turn: the session is reset first, so each call sees
      * only [systemPrompt], [userPrompt] and [imagePaths]. Keeping turns
-     * independent matters on a fixed 4096-token context — an inspection shift
-     * would otherwise overflow it after a handful of photos.
+     * independent matters on the bundle's fixed context window — an inspection
+     * shift would otherwise overflow it after a handful of photos.
      *
      * If the session was released (idle/background unload) the cached bundle is
      * made resident again first — [awaitResident] blocks until it is ready.
@@ -560,11 +590,18 @@ object NpuEngine {
     /**
      * Multi-turn conversation. [turns] is the whole exchange including the new
      * user message; the caller owns the history and is responsible for keeping
-     * it inside [CONTEXT_TOKENS].
+     * it inside [effectiveContextTokens].
      *
      * [mediaTurn] is the single turn whose images are handed to the encoder —
      * normally the latest. The SDK tokenises media incrementally, so replaying
      * earlier turns' images desyncs the image markers against the bitmaps.
+     *
+     * Sliding-window attention stays armed: the caller trims history to the
+     * window, but if measurement drift ever lets a longer prompt through, the
+     * runtime evicts middle tokens past [SLIDING_N_KEEP] instead of failing
+     * the officer's chat outright. The stateless inspection path ([run]) keeps
+     * it off — its prompts are exactly budgeted and its OCR quality must not
+     * depend on eviction behaviour.
      */
     suspend fun converse(
         turns: List<VlmChatMessage>,
@@ -580,7 +617,10 @@ object NpuEngine {
             activity = "Thinking"
             try {
                 withContext(Dispatchers.IO) {
-                    generate(w, turns, mediaTurn, maxTokens, temperature, onToken)
+                    generate(
+                        w, turns, mediaTurn, maxTokens, temperature, onToken,
+                        slidingWindow = true, slidingWindowNKeep = SLIDING_N_KEEP,
+                    )
                 }
             } finally {
                 activity = null
@@ -632,6 +672,8 @@ object NpuEngine {
         maxTokens: Int,
         temperature: Float,
         onToken: (String) -> Unit,
+        slidingWindow: Boolean = false,
+        slidingWindowNKeep: Int = 0,
     ): Result<String> {
         // The whole exchange is re-sent every call, so the session is cleared
         // first; otherwise the runtime would prepend its own copy of it.
@@ -643,6 +685,8 @@ object NpuEngine {
         val base = GenerationConfig(
             maxTokens = maxTokens,
             samplerConfig = SamplerConfig(temperature = temperature, topP = 0.9f, topK = 20),
+            slidingWindow = slidingWindow,
+            slidingWindowNKeep = slidingWindowNKeep,
         )
         val config = wrapper.injectMediaPathsToConfig(arrayOf(mediaTurn), base)
 
@@ -664,6 +708,23 @@ object NpuEngine {
             }
         }
         return failure?.let { Result.failure(it) } ?: Result.success(sb.toString())
+    }
+
+    /**
+     * Reads the downloaded bundle's own `genie_config.json` and adopts its
+     * declared context window. A no-op when the bundle dir is unknown or the
+     * config is unreadable — the previous (or default) value stays in force,
+     * because a missing signal must never shrink the budgets mid-shift.
+     */
+    fun refreshBundleContext(modelDir: String?) {
+        val config = modelDir?.takeIf { it.isNotBlank() }
+            ?.let { File(it, BundleContext.GENIE_CONFIG_NAME) }
+            ?.takeIf { it.isFile }
+            ?.let { runCatching { it.readText() }.getOrNull() }
+            ?: return
+        bundleContextTokens = BundleContext.parseContextSize(config, fallback = bundleContextTokens)
+        contextFromBundle = true
+        Log.i(TAG, "bundle context window: $bundleContextTokens tokens")
     }
 
     /** Aborts the in-flight generation; the coroutine unwinds via Completed. */
@@ -735,4 +796,11 @@ object NpuEngine {
 
     /** Watchdog polling period. */
     private const val WATCHDOG_TICK_MS = 15_000L
+
+    /**
+     * Prompt prefix the sliding window always retains on the chat path: the
+     * system prompt plus the opening exchange. Covers ~70 tokens of system
+     * instruction with room to spare; everything past it is recency-kept.
+     */
+    private const val SLIDING_N_KEEP = 256
 }
