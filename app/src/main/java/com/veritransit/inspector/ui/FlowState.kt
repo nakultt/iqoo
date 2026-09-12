@@ -53,7 +53,9 @@ class InspectionFlowState {
         confidenceVal = when {
             // The model reports its own confidence on the reconciliation; use it
             // rather than inventing one, so the figure on the record is real.
-            reported > 0f -> reported.coerceIn(0.5f, 0.999f)
+            // Values below 0.5 are kept as-is: a low number is the model saying
+            // "check this yourself", and flooring it would manufacture trust.
+            reported > 0f -> reported.coerceIn(0f, 0.999f)
             flagged -> 0.88f + Random.nextFloat() * 0.07f
             else -> 0.955f + Random.nextFloat() * 0.04f
         }

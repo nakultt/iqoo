@@ -1,5 +1,6 @@
 package com.veritransit.inspector.ai
 
+import android.util.Log
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -47,6 +48,9 @@ class ChatSession {
         turns.clear()
         pending = null
         error = null
+        // The anchors described the old transcript; keep nothing of it.
+        measuredPromptTokens = 0L
+        predictedPromptTokens = 0L
     }
 
     /**
@@ -64,7 +68,24 @@ class ChatSession {
         val builder = StringBuilder()
         try {
             val history = buildHistory()
-            val mediaTurn = history.last()
+            // The image has to be handed over on the turn that carries it, not
+            // on the last message: on a text-only follow-up the newest image
+            // sits further back in the transcript, and pointing the encoder at
+            // the last turn would drop it (and desync the template's image
+            // markers against the bitmap that never arrived).
+            val mediaTurn = history.lastOrNull { msg -> msg.contents.any { it.type == "image" } }
+                ?: history.last()
+            // What the estimator thinks this prompt costs. Held locally until
+            // the exchange completes: committing it on a failed send would
+            // pair this prediction with the measurement of an earlier
+            // exchange, and the resulting bogus drift term compounds with
+            // every retry — the overflow the budget exists to prevent.
+            val predicted = history.sumOf { msg ->
+                msg.contents.sumOf { content ->
+                    if (content.type == "image") NpuEngine.VISION_TOKENS.toLong()
+                    else estimateTokens(content.text.orEmpty()).toLong()
+                }
+            }
             NpuEngine.converse(
                 turns = history,
                 mediaTurn = mediaTurn,
@@ -75,6 +96,18 @@ class ChatSession {
                 },
             ).onSuccess { reply ->
                 val profile = NpuEngine.lastProfile
+                if (profile != null && profile.promptTokens > 0) {
+                    // Both anchors commit together, so the drift term is
+                    // always measured-vs-predicted for one and the same
+                    // exchange.
+                    measuredPromptTokens = profile.promptTokens
+                    predictedPromptTokens = predicted
+                    Log.i(
+                        TAG,
+                        "prompt measured at $measuredPromptTokens tokens " +
+                            "(estimated $predictedPromptTokens, drift ${measuredPromptTokens - predictedPromptTokens})",
+                    )
+                }
                 turns.add(
                     ChatTurn(
                         role = ChatTurn.Role.ASSISTANT,
@@ -99,11 +132,18 @@ class ChatSession {
      * estimate fits. Images are attached only to the most recent turn that
      * carried one: each costs a flat [NpuEngine.VISION_TOKENS] and replaying
      * older ones would desync the encoder's markers besides.
+     *
+     * The budget is anchored on the runtime, not the estimator: the SDK ships
+     * no pre-send tokenizer (verified against geniex-android 0.4.0), but every
+     * completed generation reports the prompt's true token count, and the gap
+     * between that and our estimate is reapplied here. Drift from the
+     * chars-per-token guess therefore never accumulates across a conversation
+     * — each measurement re-anchors it before the next send.
      */
     private fun buildHistory(): List<VlmChatMessage> {
         val system = VlmChatMessage("system", listOf(VlmContent("text", SYSTEM_PROMPT)))
         val kept = ArrayDeque<ChatTurn>()
-        var budget = CONTEXT_BUDGET - estimateTokens(SYSTEM_PROMPT)
+        var budget = CONTEXT_BUDGET - estimatorDrift()
 
         // Walk backwards so the newest turns are the ones that survive.
         for (turn in turns.reversed()) {
@@ -129,7 +169,19 @@ class ChatSession {
         }
     }
 
+    /**
+     * How far the estimator was off on the last measured exchange: positive
+     * means prompts really cost more than estimated, so the budget shrinks.
+     * Zero until the first generation completes.
+     */
+    private fun estimatorDrift(): Int =
+        if (measuredPromptTokens > 0L) (measuredPromptTokens - predictedPromptTokens)
+            .coerceIn(-CONTEXT_BUDGET.toLong(), CONTEXT_BUDGET.toLong()).toInt()
+        else 0
+
     private companion object {
+        const val TAG = "ChatSession"
+
         const val SYSTEM_PROMPT =
             "You are a helpful assistant running entirely on this phone's " +
                 "Snapdragon NPU. Answer briefly and directly. When shown an " +
@@ -140,7 +192,18 @@ class ChatSession {
 
         const val REPLY_TOKENS = 512
 
-        /** Rough English average; deliberately pessimistic so the trim is safe. */
+        /**
+         * Fallback average for turns the runtime has not measured yet; the
+         * drift correction keeps the running total honest from the first
+         * completed exchange onward. Deliberately pessimistic so the trim errs
+         * toward dropping history rather than overflowing the context.
+         */
         fun estimateTokens(text: String) = (text.length / 3) + 8
     }
+
+    /** Prompt size the runtime reported for the last completed exchange. */
+    private var measuredPromptTokens = 0L
+
+    /** What the estimator predicted for that same prompt. */
+    private var predictedPromptTokens = 0L
 }

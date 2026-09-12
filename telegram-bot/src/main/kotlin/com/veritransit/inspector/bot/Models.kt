@@ -4,7 +4,7 @@ package com.veritransit.inspector.bot
 
 enum class Verdict { PASSED, REVIEW, PENDING }
 
-enum class ItemStatus { MATCHED, SHORTAGE, UNLISTED }
+enum class ItemStatus { MATCHED, SHORTAGE, OVERAGE, UNLISTED }
 
 data class CargoItem(
     val name: String,
@@ -14,7 +14,10 @@ data class CargoItem(
 ) {
     val status: ItemStatus
         get() = when {
-            found > expected -> ItemStatus.UNLISTED
+            // Mirrors the app's data layer: an extra with no declared line is
+            // unlisted; a declared item found in greater number is an overage.
+            expected <= 0 && found > 0 -> ItemStatus.UNLISTED
+            found > expected -> ItemStatus.OVERAGE
             found < expected -> ItemStatus.SHORTAGE
             else -> ItemStatus.MATCHED
         }
