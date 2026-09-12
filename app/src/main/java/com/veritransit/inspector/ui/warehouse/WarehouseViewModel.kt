@@ -54,13 +54,22 @@ class WarehouseViewModel(app: Application) : AndroidViewModel(app) {
 
     private var engine: VerificationEngine? = null
 
-    /** Codes already handled this session, so holding the phone still over one
-     *  carton does not record the same scan forty times a second. */
-    private val handledThisSession = mutableSetOf<String>()
+    /**
+     * Debounce, not duplicate detection.
+     *
+     * Holding the phone still over one carton must not record forty scans a
+     * second — but an officer who deliberately re-scans the same box has to get
+     * an answer. The old permanent set conflated the two and silently swallowed
+     * every re-scan for the rest of the session, which reads as a dead scanner.
+     *
+     * Genuine duplicates are §4.3 layer 4's job and are already detected from
+     * the outbox (this device) and re-decided on the server across all devices.
+     */
+    private val lastSeenAt = mutableMapOf<String, Long>()
 
     fun select(ref: String) {
         _selected.value = ref
-        handledThisSession.clear()
+        lastSeenAt.clear()
         _verdict.value = null
         refreshCounts()
     }
@@ -76,15 +85,19 @@ class WarehouseViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * The hot path. Called from the camera analyser on every decoded frame —
-     * with **every** code the frame contained, so one glance at a pallet
-     * verifies all its labels at once (§7.1). It must not re-record a code it
-     * has already answered; the shown verdict and the voice belong to the
-     * worst result in the frame.
+     * The hot path. Called from the camera analyser once per frame with every
+     * live code, so one glance at a pallet verifies all its labels at once
+     * (§7.1). Each freshly seen package is evaluated and recorded; the shown
+     * verdict and the voice belong to the worst result in the frame.
      */
     fun onFrame(codes: List<String>, kind: ScanKind) {
+        val now = System.currentTimeMillis()
         val fresh = codes.mapNotNull { raw -> LabelToken.parse(raw)?.packageCode }
-            .filter { handledThisSession.add(it) }
+            .filter { code ->
+                val last = lastSeenAt[code]
+                if (last != null && now - last < RESCAN_DEBOUNCE_MS) false
+                else { lastSeenAt[code] = now; true }
+            }
         if (fresh.isEmpty()) return
 
         viewModelScope.launch {
@@ -154,10 +167,19 @@ class WarehouseViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun clearVerdict() { _verdict.value = null }
+    /**
+     * Dismissing the card is the officer saying "next box". The dismissed code
+     * is released immediately so pointing back at the same carton answers again
+     * rather than sitting mute for the rest of the debounce window.
+     */
+    fun clearVerdict() {
+        _verdict.value?.token?.packageCode?.let { lastSeenAt.remove(it) }
+        _verdict.value?.raw?.let { lastSeenAt.remove(it) }
+        _verdict.value = null
+    }
 
     /** Lets the officer re-scan a carton they deliberately want to re-check. */
-    fun forgetSession() = handledThisSession.clear()
+    fun forgetSession() = lastSeenAt.clear()
 
     // ------------------------------------------------- receiver inner session
     // Scanning a MASTER opens a guided checklist: the master declares N inners
@@ -252,4 +274,13 @@ class WarehouseViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun verdictTone(result: ScanResult) = result
+
+    private companion object {
+        /**
+         * How long the same code is ignored before it will answer again. Long
+         * enough to cover a steady hand over one carton at 30 fps, short enough
+         * that a deliberate re-scan feels immediate.
+         */
+        const val RESCAN_DEBOUNCE_MS = 2_500L
+    }
 }

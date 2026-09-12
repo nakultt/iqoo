@@ -4,9 +4,15 @@ import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import android.util.Size
+import android.view.MotionEvent
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
@@ -33,6 +39,7 @@ import com.veritransit.core.ScanResult
 import com.veritransit.inspector.scan.BarcodeAnalyzer
 import com.veritransit.inspector.scan.VerificationEngine
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * §6.1 warehouse screens.
@@ -173,9 +180,26 @@ fun PackageScanScreen(
     }
     LaunchedEffect(Unit) { if (!hasCamera) permission.launch(Manifest.permission.CAMERA) }
 
+    var torch by remember { mutableStateOf(false) }
+    // A live camera that decodes nothing looks identical to a broken app. After
+    // a few seconds of silence the officer is told what to change rather than
+    // being left to wonder whether the scanner is working at all.
+    var lastDecodeAt by remember { mutableStateOf(System.currentTimeMillis()) }
+    var struggling by remember { mutableStateOf(false) }
+    LaunchedEffect(hasCamera) {
+        while (hasCamera) {
+            kotlinx.coroutines.delay(1_000)
+            struggling = System.currentTimeMillis() - lastDecodeAt > NO_DECODE_HINT_MS
+        }
+    }
+
     Box(Modifier.fillMaxSize()) {
         if (hasCamera) {
-            CameraViewfinder { codes -> vm.onFrame(codes, kind) }
+            CameraViewfinder(torch = torch) { codes ->
+                lastDecodeAt = System.currentTimeMillis()
+                struggling = false
+                vm.onFrame(codes, kind)
+            }
         } else {
             Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
                 Text("Camera permission is needed to scan labels.", color = Color.White)
@@ -217,20 +241,92 @@ fun PackageScanScreen(
             )
         }
 
-        FilledTonalButton(
-            onClick = onDone,
+        if (hasCamera && struggling && verdict == null) {
+            Surface(
+                color = Color.Black.copy(alpha = 0.72f),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.align(Alignment.Center).padding(24.dp),
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("Searching for a label…", color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.titleSmall)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Fill the frame with the QR, hold steady, tap the screen " +
+                            "to focus. Turn the lamp on if the label is glaring.",
+                        color = Color.White.copy(alpha = 0.85f),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+        }
+
+        Row(
             modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
-        ) { Text("Done") }
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (hasCamera) {
+                FilledTonalButton(onClick = { torch = !torch }) {
+                    Text(if (torch) "Lamp on" else "Lamp")
+                }
+                Spacer(Modifier.width(8.dp))
+            }
+            FilledTonalButton(onClick = onDone) { Text("Done") }
+        }
     }
 }
 
+/** How long the viewfinder stays silent before it offers the officer advice. */
+private const val NO_DECODE_HINT_MS = 4_000L
+
+/**
+ * The scanning viewfinder.
+ *
+ * Three settings here are the difference between a scanner that works on a dock
+ * and one that does not:
+ *
+ *  * **[ANALYSIS_WIDTH]×[ANALYSIS_HEIGHT], not CameraX's 640×480 default.** A
+ *    signed label token is ~140 bytes, which is a version-7-or-higher QR at
+ *    45+ modules across. At 640×480 that needs the label to fill most of the
+ *    frame and be perfectly sharp before it will decode at all — which is
+ *    exactly the "sometimes it just doesn't scan" the dock reports.
+ *  * **Tap to focus.** Continuous AF hunts on a flat carton with no contrast,
+ *    and a QR that is soft by two pixels per module does not decode.
+ *  * **Torch.** Dock lighting is side-lit and a laminated label glares.
+ *
+ * The use cases are also unbound on dispose. Leaving them bound kept the camera
+ * hot after the officer navigated away and made the very next `EvidenceCamera`
+ * bind — the AI photo check — fail on devices that allow only one open session.
+ */
 @Composable
-private fun CameraViewfinder(onFrame: (List<String>) -> Unit) {
-    val context = LocalContext.current
+private fun CameraViewfinder(
+    torch: Boolean,
+    onFrame: (List<String>) -> Unit,
+) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val executor = remember { Executors.newSingleThreadExecutor() }
+    val analyzer = remember { mutableStateOf<BarcodeAnalyzer?>(null) }
+    val analysisRef = remember { mutableStateOf<ImageAnalysis?>(null) }
+    val providerRef = remember { mutableStateOf<ProcessCameraProvider?>(null) }
+    val cameraRef = remember { mutableStateOf<Camera?>(null) }
 
-    DisposableEffect(Unit) { onDispose { executor.shutdown() } }
+    // AndroidView's factory runs once, so the analyser would otherwise hold the
+    // first lambda for ever and keep reporting against a stale ScanKind.
+    val latestOnFrame by rememberUpdatedState(onFrame)
+
+    DisposableEffect(Unit) {
+        onDispose {
+            analysisRef.value?.clearAnalyzer()
+            analyzer.value?.close()
+            runCatching { providerRef.value?.unbindAll() }
+            executor.shutdown()
+        }
+    }
+
+    LaunchedEffect(torch, cameraRef.value) {
+        runCatching { cameraRef.value?.cameraControl?.enableTorch(torch) }
+    }
 
     AndroidView(
         modifier = Modifier.fillMaxSize(),
@@ -239,27 +335,68 @@ private fun CameraViewfinder(onFrame: (List<String>) -> Unit) {
             val providerFuture = ProcessCameraProvider.getInstance(ctx)
             providerFuture.addListener({
                 val provider = providerFuture.get()
+                providerRef.value = provider
+
                 val preview = Preview.Builder().build()
                     .also { it.setSurfaceProvider(previewView.surfaceProvider) }
 
+                val resolution = ResolutionSelector.Builder()
+                    .setResolutionStrategy(
+                        ResolutionStrategy(
+                            Size(ANALYSIS_WIDTH, ANALYSIS_HEIGHT),
+                            ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
+                        )
+                    )
+                    .build()
+
+                val barcodeAnalyzer = BarcodeAnalyzer { codes -> latestOnFrame(codes) }
                 val analysis = ImageAnalysis.Builder()
+                    .setResolutionSelector(resolution)
                     // Only the newest frame matters; a backlog would show the
                     // officer a verdict for a carton they have already moved.
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
-                    .also { it.setAnalyzer(executor, BarcodeAnalyzer(onFrame)) }
+                    .also { it.setAnalyzer(executor, barcodeAnalyzer) }
+
+                analyzer.value = barcodeAnalyzer
+                analysisRef.value = analysis
 
                 runCatching {
                     provider.unbindAll()
                     provider.bindToLifecycle(
                         lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis,
                     )
+                }.onSuccess { cameraRef.value = it }
+
+                // Tap to focus: a flat carton gives continuous AF nothing to
+                // lock onto, and a soft QR at this module density will not decode.
+                previewView.setOnTouchListener { view, event ->
+                    if (event.action == MotionEvent.ACTION_UP) {
+                        val point = previewView.meteringPointFactory
+                            .createPoint(event.x, event.y)
+                        runCatching {
+                            cameraRef.value?.cameraControl?.startFocusAndMetering(
+                                FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF)
+                                    .setAutoCancelDuration(3, TimeUnit.SECONDS)
+                                    .build()
+                            )
+                        }
+                        view.performClick()
+                    }
+                    true
                 }
             }, ContextCompat.getMainExecutor(ctx))
             previewView
         },
     )
 }
+
+/**
+ * 1280×720 for the analysis stream. Enough pixels for a version-7 QR read at
+ * arm's length; still cheap enough to keep ML Kit inside the §7.1 frame budget.
+ */
+private const val ANALYSIS_WIDTH = 1280
+private const val ANALYSIS_HEIGHT = 720
 
 @Composable
 private fun VerdictCard(

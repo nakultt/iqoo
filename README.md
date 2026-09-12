@@ -13,6 +13,10 @@ machine-verified values.
 > manifest/physical) reconciliation, payment release/hold, risk scoring, digital
 > PoD, the AI operations agent, backend + admin UI, and the phased integration
 > plan — lives in [docs/MASTER_PLAN.md](docs/MASTER_PLAN.md).
+>
+> The photo-verified scan flow — scan QR, photograph the goods, look up what the
+> database says that code contains, and prove the two agree on-device — is
+> specified in [docs/PHOTO_VERIFY_PLAN.md](docs/PHOTO_VERIFY_PLAN.md).
 
 ## Screens
 

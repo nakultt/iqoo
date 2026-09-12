@@ -78,9 +78,8 @@ class VerificationEngine(
     /**
      * Evaluates **every** label decoded from one camera frame — the one-shot
      * multi-carton read. Each signed token is verified independently; the
-     * frame's plain barcodes take part in the L3 QR↔barcode pairing per token:
-     * a token whose code no visible barcode repeats, while other barcodes are
-     * in view, is flagged as a moved label.
+     * frame's plain barcodes take part in the L3 QR↔barcode pairing per token
+     * (see the branch below for when a mismatch can be attributed).
      *
      * Bare barcodes (a Code128 whose QR has not decoded yet) produce no verdict
      * here: alone they can never verify, and rejecting them would lock the
@@ -94,8 +93,17 @@ class VerificationEngine(
     ): List<Verdict> {
         val barcodes = codes.filter { LabelToken.parse(it) == null }
         return codes.mapNotNull { LabelToken.parse(it) }.map { token ->
+            // Layer 3 pairs by value: the label's own barcode is visible and
+            // matches, a *lone* foreign barcode is a moved-label signal, but
+            // with several barcodes in view only geometry could pair them —
+            // value-matching there would flag every carton against every other.
             val paired = barcodes.firstOrNull { it == token.packageCode }
-            evaluateToken(token, paired ?: barcodes.firstOrNull(), expectedShipment, kind)
+            val barcodeCode = when {
+                paired != null -> paired
+                barcodes.size == 1 -> barcodes.single()
+                else -> null
+            }
+            evaluateToken(token, barcodeCode, expectedShipment, kind)
         }
     }
 
