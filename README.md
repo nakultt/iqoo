@@ -77,8 +77,9 @@ Four tasks use it (`ReceivingAi`):
 | Receipt Result | Drafts the receiver's factual note (text-only) |
 | Chat | General assistant for the receiving walkthrough |
 
-Every screen degrades to the scripted demo path when the model is absent, so
-the app is fully usable without the download. Manage it under
+The app stays fully usable without the download: carton labels and item codes
+are decoded on the handset by ML Kit, counts can be corrected by hand, and only
+the photo-reading steps wait on a model. Manage it under
 **Settings → On-device AI**.
 
 ### Cloud fallback (OpenRouter)
