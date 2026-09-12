@@ -54,8 +54,11 @@ class NpuInferenceTest {
         val vehicle = bill.vehicle.replace(" ", "").uppercase()
         assertTrue("vehicle number missed: '${bill.vehicle}'", vehicle.contains("TN38BX") && vehicle.contains("4491"))
         assertTrue("vehicle model missed: '${bill.vehicleModel}'", bill.vehicleModel.contains("Tata", ignoreCase = true))
+        // The fixture prints no goods rows, so a populated items list means
+        // the model invented them — exactly the hallucination a record must
+        // never inherit.
+        assertTrue("model invented goods rows on a header-only bill: ${bill.items}", bill.items.isEmpty())
         Log.i(TAG, "origin read as: '${bill.origin}'")
-        Log.i(TAG, "line items read: ${bill.items.size} (fixture prints none)")
     }
 
     @Test
@@ -94,6 +97,13 @@ class NpuInferenceTest {
             scan.confidence in 0f..1f,
         )
         assertTrue("empty observation", scan.observation.isNotBlank())
+        // The fixture is a paper bill, not a loaded bay: whatever the model
+        // lists as unlisted must never include the declared lines themselves.
+        val unlistedNames = scan.items.filter { it.expected == 0 }.map { it.name }
+        assertTrue(
+            "declared item reappeared as unlisted: $unlistedNames",
+            unlistedNames.none { u -> manifest.items.any { it.name.equals(u, ignoreCase = true) } },
+        )
         Log.i(TAG, "unlisted read: ${scan.items.filter { it.expected == 0 }}")
     }
 

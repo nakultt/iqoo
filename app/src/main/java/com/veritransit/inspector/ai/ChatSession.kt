@@ -48,6 +48,9 @@ class ChatSession {
         turns.clear()
         pending = null
         error = null
+        // The anchors described the old transcript; keep nothing of it.
+        measuredPromptTokens = 0L
+        predictedPromptTokens = 0L
     }
 
     /**
@@ -72,9 +75,12 @@ class ChatSession {
             // markers against the bitmap that never arrived).
             val mediaTurn = history.lastOrNull { msg -> msg.contents.any { it.type == "image" } }
                 ?: history.last()
-            // What the estimator thinks this prompt costs, recorded so the
-            // runtime's own count can correct it after the exchange.
-            predictedPromptTokens = history.sumOf { msg ->
+            // What the estimator thinks this prompt costs. Held locally until
+            // the exchange completes: committing it on a failed send would
+            // pair this prediction with the measurement of an earlier
+            // exchange, and the resulting bogus drift term compounds with
+            // every retry — the overflow the budget exists to prevent.
+            val predicted = history.sumOf { msg ->
                 msg.contents.sumOf { content ->
                     if (content.type == "image") NpuEngine.VISION_TOKENS.toLong()
                     else estimateTokens(content.text.orEmpty()).toLong()
@@ -91,7 +97,11 @@ class ChatSession {
             ).onSuccess { reply ->
                 val profile = NpuEngine.lastProfile
                 if (profile != null && profile.promptTokens > 0) {
+                    // Both anchors commit together, so the drift term is
+                    // always measured-vs-predicted for one and the same
+                    // exchange.
                     measuredPromptTokens = profile.promptTokens
+                    predictedPromptTokens = predicted
                     Log.i(
                         TAG,
                         "prompt measured at $measuredPromptTokens tokens " +
