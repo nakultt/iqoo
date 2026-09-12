@@ -65,6 +65,9 @@ data class ShipmentDocument(
     @SerialName("source_uri") val sourceUri: String? = null,
     @SerialName("read_by") val readBy: DocumentReader = DocumentReader.MANUAL,
     val confidence: Double? = null,
+    /** §12 safety rail: the human who confirmed the numbers on screen, if any.
+     *  Finance-critical kinds (PO, INVOICE, EWB) cannot influence money without one. */
+    @SerialName("confirmed_by") val confirmedBy: String? = null,
 )
 
 // ------------------------------------------------------- scans

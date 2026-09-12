@@ -68,6 +68,26 @@ class MatcherAndFinanceTest {
     }
 
     @Test
+    fun `the held value is exactly the sum of the financial mismatch deltas`() {
+        // §5.2 accountability: every rupee the run withholds is stated by a
+        // named mismatch, and nothing else moves money. E-way-bill (declared)
+        // disputes are regulatory, carry deltaValue 0, and hold nothing.
+        val matcher = FourWayMatcher(requireDb())
+        val financial = setOf(MismatchCode.QTY_MISMATCH, MismatchCode.VALUE_MISMATCH, MismatchCode.INNER_SHORTAGE)
+        for (ref in listOf("SHP-2026-090187", "SHP-2026-090231", "SHP-2026-090198", "SHP-2026-090244", "SHP-2026-090255")) {
+            val run = matcher.run(ref, atReceipt = true)
+            val stated = run.mismatches.filter { it.code in financial }.sumOf { it.deltaValue }
+            assertEquals(
+                Math.round(stated * 100.0) / 100.0, run.heldValue,
+                "$ref holds ₹${run.heldValue} but its mismatches state ₹$stated",
+            )
+            run.mismatches.filter { it.deltaValue > 0 }.forEach {
+                assertTrue(it.code in financial, "$ref ${it.code} holds money but is not a financial code")
+            }
+        }
+    }
+
+    @Test
     fun `a clean shipment produces no mismatches and holds nothing`() {
         val run = FourWayMatcher(requireDb()).run("SHP-2026-090187", atReceipt = true)
         assertEquals(MatchStatus.MATCHED, run.status, "unexpected: ${run.mismatches}")

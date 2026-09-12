@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { api, when } from '../api'
+import { api, auth, when } from '../api'
 import { Empty, Loading, Pill } from '../components/Bits'
 import type { ScanEvent } from '../types'
 
@@ -25,7 +25,12 @@ export default function LiveOps() {
 
   useEffect(() => {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-    const ws = new WebSocket(`${proto}://${location.host}/v1/live`)
+    // A browser cannot set headers on a WebSocket handshake, so the session
+    // token rides as a query parameter — the server closes the socket before
+    // any data flows unless it verifies.
+    const token = auth.token()
+    const qs = token ? `?token=${encodeURIComponent(token)}` : ''
+    const ws = new WebSocket(`${proto}://${location.host}/v1/live${qs}`)
     socket.current = ws
     ws.onopen = () => setConnected(true)
     ws.onclose = () => setConnected(false)

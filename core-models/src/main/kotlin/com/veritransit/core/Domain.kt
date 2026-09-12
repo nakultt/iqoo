@@ -111,6 +111,11 @@ data class ScanEvent(
     val lat: Double? = null,
     val lng: Double? = null,
     @SerialName("client_ts") val clientTs: String,
+    /** The raw §4.2 token as scanned (`VT1|P=…|SIG=…`), when the device read a
+     *  QR. The server re-verifies the signature against its own keys — the
+     *  device's verdict is an observation, never the authority (§6). When
+     *  absent the server falls back to the label it issued itself. */
+    @SerialName("label_token") val labelToken: String? = null,
 )
 
 @Serializable

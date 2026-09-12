@@ -97,24 +97,40 @@ class LabelService(
     fun closeMaster(req: CloseMasterRequest, actor: String): IssuedLabel = db.transaction { conn ->
         val shipmentId = shipmentId(conn, req.shipmentRef) ?: error("unknown shipment ${req.shipmentRef}")
         require(req.childCodes.isNotEmpty()) { "a master must contain at least one inner box" }
+        // A duplicate scan is one box scanned twice, not two boxes — closing a
+        // master over [A, A, B] would print qty 3 for a carton holding two.
+        require(req.childCodes.size == req.childCodes.toSet().size) {
+            "duplicate inner boxes in the request: " + req.childCodes.groupingBy { it }.eachCount()
+                .filter { it.value > 1 }.keys.joinToString()
+        }
 
         // Every child must already exist on this shipment and be unparented —
         // otherwise we would be silently stealing a box out of another carton.
         val children = conn.query(
-            """SELECT package_code, parent_code, shipment_id::text AS sid FROM packages
+            """SELECT package_code, parent_code, status::text AS status, shipment_id::text AS sid FROM packages
                 WHERE package_code = ANY (?)""",
             req.childCodes.toTypedArray(),
-        ) { Triple(it.str("package_code"), it.strOrNull("parent_code"), it.str("sid")) }
+        ) {
+            listOf(it.str("package_code"), it.strOrNull("parent_code"), it.str("status"), it.str("sid"))
+        }
 
-        val found = children.map { it.first }.toSet()
+        val found = children.map { it[0] }.toSet()
         val unknown = req.childCodes.filterNot { it in found }
         require(unknown.isEmpty()) { "unknown inner boxes: ${unknown.joinToString()}" }
 
-        val wrongShipment = children.filter { it.third != shipmentId }.map { it.first }
+        val wrongShipment = children.filter { it[3] != shipmentId }.map { it[0] }
         require(wrongShipment.isEmpty()) { "inner boxes on another shipment: ${wrongShipment.joinToString()}" }
 
-        val alreadyPacked = children.filter { it.second != null }.map { it.first }
+        val alreadyPacked = children.filter { it[1] != null }.map { it[0] }
         require(alreadyPacked.isEmpty()) { "already inside another master: ${alreadyPacked.joinToString()}" }
+
+        // A box already loaded onto a truck or received at the far end cannot
+        // be retroactively packed into a new carton — the physical world moved
+        // on, and the hierarchy write would contradict the scan ledger.
+        val alreadyMoved = children.filter { it[2] in listOf("LOADED", "RECEIVED") }.map { it[0] }
+        require(alreadyMoved.isEmpty()) {
+            "inner boxes already loaded or received — a master cannot be closed over them: ${alreadyMoved.joinToString()}"
+        }
 
         val masterCode = newCode()
         val contents = req.contents ?: conn.queryOne(

@@ -287,7 +287,10 @@ class VeriTransitRepo private constructor(
                 DocumentFactEntity(
                     shipmentRef = d.shipmentRef, kind = d.kind.name, docNo = d.docNo,
                     docDate = d.docDate, factJson = json.encodeToString(d.fact),
-                    confidence = d.confidence, readBy = d.readBy.name, confirmed = true,
+                    confidence = d.confidence, readBy = d.readBy.name,
+                    // Bootstrap caches what the server actually stores: a document
+                    // is confirmed only when a named human confirmed it there.
+                    confirmed = d.confirmedBy != null,
                 )
             })
             true

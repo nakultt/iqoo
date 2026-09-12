@@ -39,6 +39,9 @@ class ShipmentService(private val db: Database, private val audit: AuditLog) {
     fun create(req: CreateShipmentRequest, actor: String): Shipment {
         val ref = req.ref ?: nextRef()
         db.transaction { conn ->
+            // Single-tenant pilot (§6.2): the schema carries tenant_id for the
+            // production shape, but this deployment has one tenant and no
+            // principal-scoped queries yet — every row lands in it explicitly.
             val shipmentId = conn.queryOne(
                 """INSERT INTO shipments (tenant_id, ref, vehicle, origin_site, dest_site, status, created_by)
                    SELECT t.id, ?, ?,
@@ -156,8 +159,9 @@ class ShipmentService(private val db: Database, private val audit: AuditLog) {
     fun documents(ref: String): List<ShipmentDocument> = db.query(
         """SELECT d.id::text AS id, s.ref AS shipment_ref, d.kind, d.doc_no,
                   d.doc_date::text AS doc_date, d.fact::text AS fact, d.source_uri,
-                  d.read_by::text AS read_by, d.confidence
+                  d.read_by::text AS read_by, d.confidence, cu.name AS confirmed_by
              FROM documents d JOIN shipments s ON s.id = d.shipment_id
+                  LEFT JOIN users cu ON cu.id = d.confirmed_by
             WHERE s.ref = ? ORDER BY d.kind, d.doc_no""",
         ref, map = Rows::document,
     )

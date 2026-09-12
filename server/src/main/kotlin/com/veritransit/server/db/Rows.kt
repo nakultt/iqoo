@@ -98,6 +98,7 @@ object Rows {
             else -> DocumentReader.MANUAL
         },
         confidence = rs.dblOrNull("confidence"),
+        confirmedBy = rs.strOrNull("confirmed_by"),
     )
 
     /**

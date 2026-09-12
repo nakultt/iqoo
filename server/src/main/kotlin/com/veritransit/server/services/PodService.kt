@@ -29,10 +29,12 @@ class PodService(
 ) {
 
     fun submit(submission: PodSubmission, officer: String?): PodCertificate = db.transaction { conn ->
-        // The delivery scans go through the normal ingest path — a PoD scan is
-        // a first-class scan event, not a separate species of record.
+        // The delivery scans go through the normal ingest logic — a PoD scan is
+        // a first-class scan event, not a separate species of record — but they
+        // land inside *this* transaction: a certificate that fails to commit
+        // must not leave half-committed scans behind, and vice versa.
         if (submission.scans.isNotEmpty()) {
-            scans.ingest(submission.scans, deviceId = null, officer = officer)
+            scans.ingestWithin(conn, submission.scans, deviceId = null, officer = officer)
         }
 
         val ref = submission.shipmentRef

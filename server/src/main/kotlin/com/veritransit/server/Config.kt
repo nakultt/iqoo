@@ -24,6 +24,10 @@ data class Config(
     val llmModel: String,
     val adminWebDir: File?,
     val corsHosts: List<String>,
+    /** §6.2 — HMAC secrets for the payer webhooks, by webhook name. The
+     *  database only ever stores their digests, so the secrets arrive here,
+     *  out of band: `VT_WEBHOOK_SECRETS="zen-erp=s3cret,metro-erp=s3cret2"`. */
+    val webhookSecrets: Map<String, String>,
 ) {
     companion object {
         fun load(): Config {
@@ -51,6 +55,13 @@ data class Config(
                 adminWebDir = listOf(File("admin-web/dist"), File("../admin-web/dist"))
                     .firstOrNull { it.isDirectory },
                 corsHosts = (v("VT_CORS_HOSTS") ?: "").split(",").map(String::trim).filter(String::isNotEmpty),
+                webhookSecrets = (v("VT_WEBHOOK_SECRETS") ?: "").split(',')
+                    .mapNotNull { entry ->
+                        val parts = entry.split('=', limit = 2).map(String::trim)
+                        if (parts.size != 2 || parts[0].isEmpty() || parts[1].isEmpty()) null
+                        else parts[0] to parts[1]
+                    }
+                    .toMap(),
             )
         }
 

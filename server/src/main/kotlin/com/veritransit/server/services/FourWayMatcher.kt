@@ -17,6 +17,13 @@ import kotlin.math.abs
  * defines what was actually authorised. An invoice that exceeds it is an
  * over-bill even when the goods are physically present — which is exactly the
  * case the plan's running example turns on.
+ *
+ * The **money is accountable**: `held_value` is exactly the sum of the
+ * `delta_value` of the financial mismatches — the PO-vs-invoice quantity
+ * over-bill, the value over-charge, and the invoice-vs-physical shortfall. A
+ * declared-vs-invoiced (e-way bill) dispute is a regulatory problem, not money
+ * the buyer withholds, so it is reported with `delta_value = 0`. Every
+ * finance-relevant mismatch moves money; every non-financial one says so.
  */
 class FourWayMatcher(private val db: Database) {
 
@@ -38,20 +45,42 @@ class FourWayMatcher(private val db: Database) {
     private fun physicalByLine(ref: String, received: Boolean): Map<Int, Double> =
         if (received) physicalAtReceipt(ref) else physicalAtDispatch(ref)
 
-    private fun physicalAtReceipt(ref: String): Map<Int, Double> = db.query(
-        """SELECT p.po_line_no AS line,
-                  SUM(CASE
-                        WHEN p.kind <> 'UNIT' AND NOT EXISTS (
-                             SELECT 1 FROM packages c WHERE c.parent_code = p.package_code)
-                          THEN p.qty
-                        WHEN p.kind = 'UNIT' THEN 1
-                        ELSE 0
-                      END) AS qty
-             FROM packages p JOIN shipments s ON s.id = p.shipment_id
-            WHERE s.ref = ? AND p.po_line_no IS NOT NULL AND p.status = 'RECEIVED'
-            GROUP BY p.po_line_no""",
+    /**
+     * §5.3 — the shipment's current friction band decides how deep receipt
+     * verification goes. LOW means `master_scan_only`: a received master
+     * vouches for its declared subtree.
+     */
+    private fun shipmentBand(ref: String): RiskBand? = db.queryOne(
+        """SELECT band::text AS band FROM risk_scores
+            WHERE subject_kind = 'shipment' AND subject_id = ?
+            ORDER BY computed_at DESC LIMIT 1""",
         ref,
-    ) { it.int("line") to it.dbl("qty") }.toMap()
+    ) { runCatching { RiskBand.valueOf(it.str("band")) }.getOrNull() }
+
+    private fun physicalAtReceipt(ref: String): Map<Int, Double> {
+        // LOW-risk shipments verify masters, not every inner box: the master's
+        // own RECEIVE counts its declared quantity, minus any inner boxes that
+        // were additionally verified individually — never both, or a
+        // master-plus-children receipt would double count the line.
+        val masterScanOnly = shipmentBand(ref) == RiskBand.LOW
+        return db.query(
+            """SELECT p.po_line_no AS line,
+                      SUM(CASE
+                            WHEN p.kind = 'UNIT' THEN 1
+                            WHEN NOT EXISTS (
+                                 SELECT 1 FROM packages c WHERE c.parent_code = p.package_code)
+                              THEN p.qty
+                            WHEN ?::text = 'LOW' THEN GREATEST(p.qty - (
+                                 SELECT count(*) FROM packages c
+                                  WHERE c.parent_code = p.package_code AND c.status = 'RECEIVED'), 0)
+                            ELSE 0
+                          END) AS qty
+                 FROM packages p JOIN shipments s ON s.id = p.shipment_id
+                WHERE s.ref = ? AND p.po_line_no IS NOT NULL AND p.status = 'RECEIVED'
+                GROUP BY p.po_line_no""",
+            if (masterScanOnly) "LOW" else "OTHER", ref,
+        ) { it.int("line") to it.dbl("qty") }.toMap()
+    }
 
     private fun physicalAtDispatch(ref: String): Map<Int, Double> = db.query(
         """WITH loaded AS (
@@ -73,9 +102,15 @@ class FourWayMatcher(private val db: Database) {
         ref, ref,
     ) { it.int("line") to it.dbl("qty") }.toMap()
 
+    /**
+     * §12 safety rail: only a document a human confirmed can influence money.
+     * A machine reading with no confirming person is treated as absent — the
+     * match reports it missing, which blocks release rather than mispricing it.
+     */
     private fun documentOf(ref: String, kind: DocumentKind): DocumentFact? = db.queryOne(
         """SELECT d.fact::text AS fact FROM documents d JOIN shipments s ON s.id = d.shipment_id
-            WHERE s.ref = ? AND d.kind = ?::document_kind ORDER BY d.uploaded_at DESC LIMIT 1""",
+            WHERE s.ref = ? AND d.kind = ?::document_kind AND d.confirmed_by IS NOT NULL
+            ORDER BY d.uploaded_at DESC LIMIT 1""",
         ref, kind.name,
     ) { runCatching { Rows.json.decodeFromString<DocumentFact>(it.str("fact")) }.getOrNull() }
 
@@ -139,27 +174,33 @@ class FourWayMatcher(private val db: Database) {
             }
 
             // PO vs invoice — over-billing, the case that survives a physical count.
+            // The run holds exactly what the mismatch states, so an auditor can
+            // add the reported deltas back up and land on held_value.
             if (po != null && invLine != null && !withinQty(poLine.qty, invLine.qty, tol)) {
-                val delta = abs(invLine.qty - poLine.qty) * rate
+                val delta = round2(abs(invLine.qty - poLine.qty) * rate)
                 held += delta
                 mismatches += Mismatch(
                     code = MismatchCode.QTY_MISMATCH, pair = MatchPair.PO_VS_INVOICE,
                     lineNo = poLine.lineNo, sku = poLine.sku,
                     orderedQty = poLine.qty, invoicedQty = invLine.qty,
                     declaredQty = ewbLine?.qty, physicalQty = phys,
-                    deltaQty = invLine.qty - poLine.qty, deltaValue = round2(delta),
+                    deltaQty = invLine.qty - poLine.qty, deltaValue = delta,
                     detail = "invoiced ${fmt(invLine.qty)} against PO ${fmt(poLine.qty)}",
                 )
             }
 
             // Invoice vs e-way bill — the declared consignment should mirror the bill.
+            // A declared-quantity dispute is a regulatory problem, not money the
+            // buyer withholds: it is reported and quantified in the detail, but it
+            // contributes nothing to the held value (§5.2 holds on over-billing
+            // and short-ship only).
             if (invLine != null && ewbLine != null && !withinQty(invLine.qty, ewbLine.qty, tol)) {
                 mismatches += Mismatch(
                     code = MismatchCode.QTY_MISMATCH, pair = MatchPair.INVOICE_VS_EWB,
                     lineNo = poLine.lineNo, sku = poLine.sku,
                     invoicedQty = invLine.qty, declaredQty = ewbLine.qty,
                     deltaQty = ewbLine.qty - invLine.qty,
-                    deltaValue = round2(abs(ewbLine.qty - invLine.qty) * rate),
+                    deltaValue = 0.0,
                     detail = "e-way bill declares ${fmt(ewbLine.qty)} against invoice ${fmt(invLine.qty)}",
                 )
             }
@@ -167,7 +208,7 @@ class FourWayMatcher(private val db: Database) {
             // Invoice vs physical — a short-ship. Only a shortfall is held; an
             // overage is a discrepancy but not money the buyer should withhold.
             if (invLine != null && phys != null && phys < invLine.qty) {
-                val delta = (invLine.qty - phys) * rate
+                val delta = round2((invLine.qty - phys) * rate)
                 held += delta
                 mismatches += Mismatch(
                     code = if (isInnerShortage(ref, poLine.lineNo)) MismatchCode.INNER_SHORTAGE
@@ -176,21 +217,30 @@ class FourWayMatcher(private val db: Database) {
                     lineNo = poLine.lineNo, sku = poLine.sku,
                     orderedQty = po?.let { poLine.qty }, invoicedQty = invLine.qty,
                     declaredQty = ewbLine?.qty, physicalQty = phys,
-                    deltaQty = phys - invLine.qty, deltaValue = round2(delta),
+                    deltaQty = phys - invLine.qty, deltaValue = delta,
                     detail = "physically verified ${fmt(phys)} of ${fmt(invLine.qty)} invoiced",
                 )
             }
 
             // Value check, independent of quantity: a line can carry the right
-            // count at the wrong rate.
+            // count at the wrong rate. The held amount is the part of the
+            // invoice above its own quantities valued at the PO rate — an
+            // over-charge. Together with the quantity over-bill that
+            // QTY_MISMATCH already holds, the two never double count and
+            // reproduce exactly `invoiced amount − PO-authorised value`.
+            // An under-charge is reported but not withheld.
             if (invLine != null && po != null && poLine.amount > 0 && invLine.amount > 0) {
                 val expected = poLine.rate * invLine.qty
                 if (expected > 0 && abs(invLine.amount - expected) / expected * 100 > tol.valuePct) {
+                    val excess = round2(maxOf(invLine.amount - expected, 0.0))
+                    held += excess
                     mismatches += Mismatch(
                         code = MismatchCode.VALUE_MISMATCH, pair = MatchPair.PO_VS_INVOICE,
                         lineNo = poLine.lineNo, sku = poLine.sku,
-                        deltaValue = round2(abs(invLine.amount - expected)),
-                        detail = "line value ${fmt(invLine.amount)} against ${fmt(expected)} at PO rate",
+                        orderedQty = poLine.qty, invoicedQty = invLine.qty,
+                        deltaValue = excess,
+                        detail = "line value ${fmt(invLine.amount)} against ${fmt(expected)} at PO rate" +
+                            if (excess > 0) " — holding the ₹${fmt(excess)} excess" else "",
                     )
                 }
             }

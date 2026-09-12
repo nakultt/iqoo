@@ -12,14 +12,16 @@ import com.google.mlkit.vision.common.InputImage
 /**
  * §6.1 / §7.1 — CameraX frames into ML Kit, entirely on-device.
  *
- * Both symbologies are decoded from the **same frame** on purpose. The QR and
- * the Code128 print the same package code, so reading them together is what
- * detects a label physically peeled off one carton and stuck on another
- * (§4.3 layer 3). Decoding them from separate frames would let a fraudster
- * present each code in turn.
+ * Every symbology is decoded from the **same frame**, and **every code in the
+ * frame is delivered**, not just the first of each kind: pointing the phone at
+ * a pallet and reading all its labels in one shot is the §7.1 demo. The QR and
+ * the Code128 print the same package code, so reading them together is also
+ * what detects a label physically peeled off one carton and stuck on another
+ * (§4.3 layer 3) — that pairing check happens per token downstream, in
+ * [VerificationEngine.evaluateFrame].
  */
 class BarcodeAnalyzer(
-    private val onCodes: (qr: String?, barcode: String?) -> Unit,
+    private val onFrame: (codes: List<String>) -> Unit,
 ) : ImageAnalysis.Analyzer {
 
     private val scanner: BarcodeScanner = BarcodeScanning.getClient(
@@ -36,12 +38,8 @@ class BarcodeAnalyzer(
         val image = InputImage.fromMediaImage(media, proxy.imageInfo.rotationDegrees)
         scanner.process(image)
             .addOnSuccessListener { barcodes ->
-                if (barcodes.isEmpty()) return@addOnSuccessListener
-                val qr = barcodes.firstOrNull {
-                    it.format == Barcode.FORMAT_QR_CODE || it.format == Barcode.FORMAT_DATA_MATRIX
-                }?.rawValue
-                val code128 = barcodes.firstOrNull { it.format == Barcode.FORMAT_CODE_128 }?.rawValue
-                if (qr != null || code128 != null) onCodes(qr, code128)
+                val codes = barcodes.mapNotNull { it.rawValue }.distinct()
+                if (codes.isNotEmpty()) onFrame(codes)
             }
             // The frame must be closed on every path or the analysis stream stalls
             // after a handful of frames and the viewfinder silently freezes.

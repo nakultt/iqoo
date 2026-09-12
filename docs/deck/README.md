@@ -6,10 +6,14 @@ generated from source — edit the source, re-run one command, get the deck back
 
 | | |
 | --- | --- |
-| Deliverable | [`VeriTransit-Worker-Copilot.pptx`](VeriTransit-Worker-Copilot.pptx) |
-| Motion asset | [`motion/verification-flow/`](motion/verification-flow/) — `output.mp4` + `poster.png` |
+| Deliverable | `VeriTransit-Worker-Copilot.pptx` — **generated, not committed**; `node build.js` writes it |
+| Motion asset | [`motion/verification-flow/`](motion/verification-flow/) — `render.js` writes `output.mp4` + `poster.png` |
 | Chart data | [`data/charts.json`](data/charts.json) |
 | Design system | [`lib/theme.js`](lib/theme.js) |
+
+The built artifacts (`.pptx`, `.pdf`, MP4, poster) are gitignored — they are
+outputs of the sources above, and committing multi-megabyte binaries to the
+implementation repo made every review and clone heavier for no benefit.
 
 ## Regenerate
 

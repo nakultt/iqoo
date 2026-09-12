@@ -3,8 +3,10 @@ package com.veritransit.server
 import com.veritransit.core.PublicKeyEntry
 import com.veritransit.core.ApiError
 import com.veritransit.server.auth.Sessions
+import com.veritransit.server.auth.veriTransitAuth
 import com.veritransit.server.crypto.AuditLog
 import com.veritransit.server.crypto.Signer
+import com.veritransit.server.crypto.Verifier
 import com.veritransit.server.db.Database
 import com.veritransit.server.db.str
 import com.veritransit.server.routes.apiRoutes
@@ -14,6 +16,7 @@ import io.ktor.client.engine.cio.*
 import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.application.*
+import io.ktor.server.auth.*
 import io.ktor.server.engine.*
 import io.ktor.server.http.content.*
 import io.ktor.server.netty.*
@@ -77,13 +80,20 @@ fun buildServices(config: Config): Services {
     val operatorSecret = System.getenv("VT_OPERATOR_SECRET") ?: "veritransit-pilot"
 
     val http = HttpClient(CIO)
-    val webhooks = WebhookService(db, http)
+    val webhooks = WebhookService(db, http, config.webhookSecrets)
     val shipments = ShipmentService(db, audit)
     val labels = LabelService(db, signer, audit)
-    val scans = ScanService(db, audit)
     val documents = DocumentService(db, audit)
     val matcher = FourWayMatcher(db)
-    val finance = FinanceService(db, signer, audit, webhooks)
+
+    // The same public keys the devices pin: ingest re-verifies every label
+    // server-side, because the device's verdict is evidence, not authority.
+    val verifier = Verifier.of(db.query(
+        "SELECT key_id, public_key FROM signing_keys WHERE active",
+    ) { it.str("key_id") to it.str("public_key") }.toMap())
+
+    val scans = ScanService(db, audit, verifier)
+    val finance = FinanceService(db, signer, audit, webhooks, matcher)
     val risk = RiskEngine(db)
     val pod = PodService(db, signer, audit, matcher, scans)
 
@@ -137,6 +147,9 @@ fun Application.module(services: Services) {
     }
     install(CallLogging) { level = Level.INFO }
     install(WebSockets)
+    install(Authentication) {
+        veriTransitAuth(services.sessions)
+    }
     install(CORS) {
         allowMethod(HttpMethod.Get); allowMethod(HttpMethod.Post)
         allowMethod(HttpMethod.Put); allowMethod(HttpMethod.Delete)

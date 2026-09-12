@@ -175,7 +175,7 @@ fun PackageScanScreen(
 
     Box(Modifier.fillMaxSize()) {
         if (hasCamera) {
-            CameraViewfinder { qr, barcode -> vm.onCodes(qr, barcode, kind) }
+            CameraViewfinder { codes -> vm.onFrame(codes, kind) }
         } else {
             Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
                 Text("Camera permission is needed to scan labels.", color = Color.White)
@@ -225,7 +225,7 @@ fun PackageScanScreen(
 }
 
 @Composable
-private fun CameraViewfinder(onCodes: (String?, String?) -> Unit) {
+private fun CameraViewfinder(onFrame: (List<String>) -> Unit) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val executor = remember { Executors.newSingleThreadExecutor() }
@@ -247,7 +247,7 @@ private fun CameraViewfinder(onCodes: (String?, String?) -> Unit) {
                     // officer a verdict for a carton they have already moved.
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
-                    .also { it.setAnalyzer(executor, BarcodeAnalyzer(onCodes)) }
+                    .also { it.setAnalyzer(executor, BarcodeAnalyzer(onFrame)) }
 
                 runCatching {
                     provider.unbindAll()

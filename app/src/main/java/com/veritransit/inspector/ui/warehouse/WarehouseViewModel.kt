@@ -3,6 +3,7 @@ package com.veritransit.inspector.ui.warehouse
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.veritransit.core.LabelToken
 import com.veritransit.core.ScanKind
 import com.veritransit.core.ScanResult
 import com.veritransit.inspector.ai.KokoroVoice
@@ -22,7 +23,7 @@ import kotlinx.coroutines.launch
 /**
  * State for the warehouse mode (§6.1).
  *
- * The scan path is deliberately synchronous to a verdict: [onCodes] evaluates
+ * The scan path is deliberately synchronous to a verdict: [onFrame] evaluates
  * and records without awaiting anything remote, because §7.1 budgets under 1.5 s
  * from frame to haptic and a dock has no network to wait on anyway.
  */
@@ -75,23 +76,31 @@ class WarehouseViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * The hot path. Called from the camera analyser on every decoded frame, so
-     * it must be cheap and must not re-record a code it has already answered.
+     * The hot path. Called from the camera analyser on every decoded frame —
+     * with **every** code the frame contained, so one glance at a pallet
+     * verifies all its labels at once (§7.1). It must not re-record a code it
+     * has already answered; the shown verdict and the voice belong to the
+     * worst result in the frame.
      */
-    fun onCodes(qr: String?, barcode: String?, kind: ScanKind) {
-        val key = qr ?: barcode ?: return
-        if (!handledThisSession.add(key)) return
+    fun onFrame(codes: List<String>, kind: ScanKind) {
+        val fresh = codes.mapNotNull { raw -> LabelToken.parse(raw)?.packageCode }
+            .filter { handledThisSession.add(it) }
+        if (fresh.isEmpty()) return
 
         viewModelScope.launch {
             val e = engine ?: repo.engine().also { engine = it }
-            val verdict = e.evaluate(qr, barcode, _selected.value, kind)
-            _verdict.value = verdict
+            val verdicts = e.evaluateFrame(codes, _selected.value, kind)
+                .filter { it.token != null && it.token.packageCode in fresh }
+            if (verdicts.isEmpty()) return@launch
+
+            val worst = verdicts.maxBy { it.result.ordinal }
+            _verdict.value = worst
 
             // Recorded whatever the verdict: a rejection is evidence too, and the
             // discrepancy queue is built from exactly these events.
-            verdict.token?.let { token ->
+            verdicts.forEach { verdict ->
                 repo.recordScan(
-                    packageCode = token.packageCode,
+                    packageCode = verdict.token!!.packageCode,
                     shipmentRef = _selected.value,
                     kind = kind,
                     result = verdict.result,
@@ -102,14 +111,15 @@ class WarehouseViewModel(app: Application) : AndroidViewModel(app) {
 
             // Spoken the moment anything is wrong: the officer hears the reason
             // without lowering the phone, and the supervisor gets a voice note.
+            // One voice per frame — the worst — never a chorus.
             VoiceAnnouncer.announceScan(
-                getApplication(), verdict.result,
-                verdict.token?.packageCode, verdict.reasons,
+                getApplication(), worst.result,
+                worst.token?.packageCode, worst.reasons,
             )
-            if (VoiceAnnouncer.wantsVoiceNote(verdict.result, verdict.reasons) &&
+            if (VoiceAnnouncer.wantsVoiceNote(worst.result, worst.reasons) &&
                 DeviceSettings(getApplication()).telegramVoice
             ) {
-                queueVoiceNote(verdict)
+                queueVoiceNote(worst)
             }
         }
     }

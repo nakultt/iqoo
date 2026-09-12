@@ -1,10 +1,14 @@
 package com.veritransit.server.auth
 
+import com.veritransit.core.ApiError
 import com.veritransit.core.UserRole
 import com.veritransit.server.crypto.ApiKeys
 import com.veritransit.server.db.*
+import io.ktor.http.*
 import io.ktor.server.application.*
+import io.ktor.server.auth.*
 import io.ktor.server.request.*
+import io.ktor.server.response.*
 import java.time.Instant
 import java.util.Base64
 import javax.crypto.Mac
@@ -30,7 +34,9 @@ import javax.crypto.spec.SecretKeySpec
  */
 class Sessions(private val db: Database, private val secret: String, private val operatorSecret: String) {
 
-    data class Principal(val subject: String, val role: UserRole, val isDevice: Boolean = false)
+    data class Principal(
+        val subject: String, val role: UserRole, val isDevice: Boolean = false,
+    ) : io.ktor.server.auth.Principal
 
     class AuthError(message: String) : RuntimeException(message)
 
@@ -102,7 +108,60 @@ fun ApplicationCall.principal(sessions: Sessions): Sessions.Principal? {
     return sessions.verify(auth.substring(7).trim())
 }
 
-/** The acting human, for audit and maker-checker. Devices carry their officer explicitly. */
+/**
+ * The acting human, for audit and maker-checker. Devices carry their officer
+ * explicitly; a signed-in principal is their own actor, never whoever a header
+ * claims. Routes only reach this after the Ktor authentication gate, so the
+ * old anonymous fallback can no longer put unattributed rows in the ledger.
+ */
 fun ApplicationCall.actor(sessions: Sessions): String =
     principal(sessions)?.let { if (it.isDevice) request.headers["X-Officer"] ?: it.subject else it.subject }
         ?: request.headers["X-Officer"] ?: "anonymous"
+
+/**
+ * Role gate for authenticated routes (§6.2). Every protected handler calls this
+ * first with the roles allowed on it; the mapping is the authorization matrix
+ * in `server/README.md`. Responds and returns false when the caller's role is
+ * not one of [roles] — the handler must stop.
+ */
+suspend fun ApplicationCall.requireRole(vararg roles: UserRole): Boolean {
+    val principal = principal<Sessions.Principal>()
+    if (principal == null) {
+        respond(HttpStatusCode.Unauthorized, ApiError("unauthorized", "sign in or activate a device"))
+        return false
+    }
+    if (roles.isEmpty() || principal.role in roles) return true
+    respond(
+        HttpStatusCode.Forbidden,
+        ApiError(
+            "forbidden",
+            "${principal.role} may not perform this action — requires ${roles.joinToString(" or ") { it.name }}",
+        ),
+    )
+    return false
+}
+
+/**
+ * The Ktor authentication provider backing the `authenticate("vt") { }` block
+ * around the §8.3 surface. Resolves devices (X-API-Key) and people
+ * (Authorization: Bearer) into one principal type; anything else is challenged
+ * with a readable JSON 401.
+ */
+fun AuthenticationConfig.veriTransitAuth(sessions: Sessions) {
+    provider("vt") {
+        authenticate { context ->
+            val principal = context.call.principal(sessions)
+            if (principal != null) {
+                context.principal(principal)
+            } else {
+                context.challenge("vt-unauthorized", AuthenticationFailedCause.NoCredentials) { challenge, call ->
+                    call.respond(
+                        HttpStatusCode.Unauthorized,
+                        ApiError("unauthorized", "activate this device, or sign in"),
+                    )
+                    challenge.complete()
+                }
+            }
+        }
+    }
+}

@@ -8,8 +8,9 @@ import io.ktor.http.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.encodeToString
 import org.slf4j.LoggerFactory
 import java.sql.Connection
@@ -23,11 +24,26 @@ import javax.crypto.spec.SecretKeySpec
  * a certificate is never announced to an ERP for a release that then rolls
  * back. Failures retry with backoff and stay visible in `webhook_deliveries`
  * rather than disappearing into a log.
+ *
+ * **Signing secrets never come from the database.** `webhooks.secret_hash`
+ * stores a digest for audit; a digest cannot be un-hashed, so signing with it
+ * (as an earlier revision did) would have produced HMACs no receiver could
+ * verify. The real secrets are supplied out of band via `VT_WEBHOOK_SECRETS`
+ * (`name=secret` pairs, or a vault-backed env in a real deployment) and looked
+ * up per webhook by name. A webhook without a configured secret is never sent
+ * unsigned — its deliveries fail visibly with instructions instead.
  */
-class WebhookService(private val db: Database, private val http: HttpClient) {
+class WebhookService(
+    private val db: Database,
+    private val http: HttpClient,
+    private val secrets: Map<String, String> = emptyMap(),
+) {
 
     private val log = LoggerFactory.getLogger(javaClass)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** One flush at a time — the timer and a manual flush must not interleave. */
+    private val flushing = Mutex()
 
     /** Queues a delivery for every active webhook subscribed to [event]. */
     fun enqueue(conn: Connection, event: String, shipmentRef: String, payload: Map<String, String>) {
@@ -39,36 +55,71 @@ class WebhookService(private val db: Database, private val http: HttpClient) {
         )
     }
 
-    /** Sends everything still pending. Called after commit and on a timer. */
+    /**
+     * Sends everything pending and due. Called after commit and on a timer.
+     *
+     * Each delivery is **claimed atomically** — `attempts` is bumped under a
+     * compare-and-set before the HTTP call — so two flushes (or two server
+     * processes) that select the same pending row can never both send it: only
+     * the one whose CAS wins pays the attempt. Backoff is computed from
+     * `attempts` against the queue time, so the flush never sleeps and never
+     * holds anything up behind a retrying row.
+     */
     fun flush() {
         scope.launch {
-            val pending = db.query(
-                """SELECT d.id::text AS id, d.event, d.payload::text AS payload, d.attempts,
-                          w.url, w.secret_hash, w.name
-                     FROM webhook_deliveries d JOIN webhooks w ON w.id = d.webhook_id
-                    WHERE d.delivered_at IS NULL AND d.attempts < 6
-                    ORDER BY d.created_at LIMIT 25""",
-            ) {
-                mapOf(
-                    "id" to it.str("id"), "event" to it.str("event"), "payload" to it.str("payload"),
-                    "attempts" to it.int("attempts").toString(), "url" to it.str("url"),
-                    "secret" to it.str("secret_hash"), "name" to it.str("name"),
-                )
-            }
+            flushing.withLock {
+                val pending = db.query(
+                    """SELECT d.id::text AS id, d.event, d.payload::text AS payload, d.attempts,
+                              w.url, w.name
+                         FROM webhook_deliveries d JOIN webhooks w ON w.id = d.webhook_id
+                        WHERE d.delivered_at IS NULL AND d.attempts < 6
+                          AND (d.attempts = 0 OR d.created_at < now()
+                               - (LEAST(power(2::numeric, d.attempts), 60) * interval '1 second'))
+                        ORDER BY d.created_at LIMIT 25""",
+                ) {
+                    mapOf(
+                        "id" to it.str("id"), "event" to it.str("event"), "payload" to it.str("payload"),
+                        "attempts" to it.int("attempts").toString(), "url" to it.str("url"),
+                        "name" to it.str("name"),
+                    )
+                }
 
-            for (d in pending) {
-                val attempts = d["attempts"]!!.toInt()
-                // Exponential backoff, so a payer that is down for an hour is not
-                // hammered — and so a retry storm cannot look like an attack.
-                if (attempts > 0) delay(minOf(1L shl attempts, 60L) * 1000)
-                deliver(d)
+                for (d in pending) {
+                    runCatching { deliver(d) }.onFailure { t ->
+                        log.warn("webhook {} delivery crashed: {}", d["name"], t.message)
+                    }
+                }
             }
         }
     }
 
     private suspend fun deliver(d: Map<String, String>) {
+        // A missing secret is a configuration error, not a reason to send a
+        // payload the receiver cannot authenticate — or worse, send it plain.
+        val secret = secrets[d["name"]!!]
+        if (secret == null) {
+            db.update(
+                """UPDATE webhook_deliveries SET attempts = attempts + 1, last_error = ?
+                    WHERE id = ?::uuid""",
+                "no signing secret configured for webhook '${d["name"]}' — set VT_WEBHOOK_SECRETS " +
+                    "(${d["name"]}=<secret>) and flush again",
+                d["id"],
+            )
+            log.warn("webhook {} has no signing secret configured — delivery withheld", d["name"])
+            return
+        }
+
+        // Claim the delivery: the CAS on `attempts` is the lease. A concurrent
+        // flush reading the same attempts value loses here and moves on.
+        val claimed = db.update(
+            """UPDATE webhook_deliveries SET attempts = attempts + 1
+                WHERE id = ?::uuid AND attempts = ?""",
+            d["id"], d["attempts"]!!.toInt(),
+        )
+        if (claimed == 0) return
+
         val body = d["payload"]!!
-        val signature = hmacSha256(d["secret"]!!, body)
+        val signature = hmacSha256(secret, body)
         val result = runCatching {
             http.post(d["url"]!!) {
                 contentType(ContentType.Application.Json)
@@ -84,7 +135,7 @@ class WebhookService(private val db: Database, private val http: HttpClient) {
             val ok = response.status.isSuccess()
             db.update(
                 """UPDATE webhook_deliveries
-                      SET attempts = attempts + 1, status_code = ?,
+                      SET status_code = ?,
                           delivered_at = CASE WHEN ? THEN now() ELSE NULL END,
                           last_error = CASE WHEN ? THEN NULL ELSE ? END
                     WHERE id = ?::uuid""",
@@ -94,8 +145,7 @@ class WebhookService(private val db: Database, private val http: HttpClient) {
             if (!ok) log.warn("webhook {} returned {}", d["name"], response.status)
         }.onFailure { t ->
             db.update(
-                """UPDATE webhook_deliveries SET attempts = attempts + 1, last_error = ?
-                    WHERE id = ?::uuid""",
+                """UPDATE webhook_deliveries SET last_error = ? WHERE id = ?::uuid""",
                 t.message ?: t.javaClass.simpleName, d["id"],
             )
             log.warn("webhook {} failed: {}", d["name"], t.message)

@@ -72,6 +72,39 @@ class VerificationEngine(
                 null, null, raw = raw,
             )
 
+        return evaluateToken(token, barcode, expectedShipment, kind).copy(raw = raw)
+    }
+
+    /**
+     * Evaluates **every** label decoded from one camera frame — the one-shot
+     * multi-carton read. Each signed token is verified independently; the
+     * frame's plain barcodes take part in the L3 QR↔barcode pairing per token:
+     * a token whose code no visible barcode repeats, while other barcodes are
+     * in view, is flagged as a moved label.
+     *
+     * Bare barcodes (a Code128 whose QR has not decoded yet) produce no verdict
+     * here: alone they can never verify, and rejecting them would lock the
+     * carton out of the session before its QR ever got read — the next frame
+     * delivers the verdict instead.
+     */
+    suspend fun evaluateFrame(
+        codes: List<String>,
+        expectedShipment: String?,
+        kind: ScanKind,
+    ): List<Verdict> {
+        val barcodes = codes.filter { LabelToken.parse(it) == null }
+        return codes.mapNotNull { LabelToken.parse(it) }.map { token ->
+            val paired = barcodes.firstOrNull { it == token.packageCode }
+            evaluateToken(token, paired ?: barcodes.firstOrNull(), expectedShipment, kind)
+        }
+    }
+
+    private suspend fun evaluateToken(
+        token: LabelToken,
+        barcodeCode: String?,
+        expectedShipment: String?,
+        kind: ScanKind,
+    ): Verdict {
         val verified = verifier.verify(token)
         val known = packages.byCode(token.packageCode)
 
@@ -83,13 +116,13 @@ class VerificationEngine(
             token = token,
             verified = verified,
             expectedShipment = expectedShipment,
-            barcodeCode = barcode,
+            barcodeCode = barcodeCode,
             known = known?.toCore(),
             duplicate = duplicate,
         )
 
         val declaredInners = if (known != null && known.kind != PackageKind.UNIT.name) known.qty else 0
-        return Verdict(result, reasons, token, known, declaredInners, raw)
+        return Verdict(result, reasons, token, known, declaredInners, raw = null)
     }
 
     /**

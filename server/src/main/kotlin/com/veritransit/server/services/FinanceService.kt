@@ -28,6 +28,7 @@ class FinanceService(
     private val signer: Signer,
     private val audit: AuditLog,
     private val webhooks: WebhookService,
+    private val matcher: FourWayMatcher,
 ) {
 
     class StateError(message: String) : IllegalStateException(message)
@@ -90,11 +91,16 @@ class FinanceService(
 
     /**
      * Maker half of maker-checker. Records the intent; no value moves yet.
+     * Asking for less than the verified balance is a partial release — the
+     * remainder stays releasable after the checker approves this one.
      */
     fun requestRelease(ref: String, maker: String, amount: Double?, note: String?): FinanceActionResponse =
         db.transaction { conn ->
             val st = state(ref) ?: throw StateError("shipment $ref has no finance terms")
             if (st.status == FinanceStatus.RELEASED) throw StateError("already released")
+            if (st.status == FinanceStatus.RELEASE_PENDING) {
+                throw StateError("a release is already awaiting a checker — approve it before requesting more")
+            }
             if (st.status == FinanceStatus.HELD) {
                 throw StateError("held for ₹${"%.2f".format(st.heldValue)} — resolve the mismatch first")
             }
@@ -106,6 +112,9 @@ class FinanceService(
             val ask = amount ?: releasable
             if (ask > releasable + 0.005) {
                 throw StateError("cannot release ₹${"%.2f".format(ask)}; only ₹${"%.2f".format(releasable)} is verified")
+            }
+            if (ask <= 0.0) {
+                throw StateError("release amount must be positive")
             }
 
             conn.update(
@@ -129,6 +138,11 @@ class FinanceService(
      * Checker half. The checker must be a different person than the maker —
      * enforced here on the server, so a compromised Telegram chat cannot
      * approve its own request (§5.5).
+     *
+     * Approving a partial request releases exactly what was asked and returns
+     * to VERIFIED while anything of the verified balance remains releasable —
+     * §5.2 partial release. The shipment only reaches RELEASED once the
+     * verified amount is exhausted.
      */
     fun approveRelease(ref: String, checker: String): FinanceActionResponse = db.transaction { conn ->
         val st = state(ref) ?: throw StateError("shipment $ref has no finance terms")
@@ -147,11 +161,23 @@ class FinanceService(
             throw StateError("maker-checker: $checker requested this release and cannot approve it")
         }
 
+        val releasable = releasableValue(st)
+        if (amount > releasable + 0.005) {
+            throw StateError(
+                "cannot approve ₹${"%.2f".format(amount)}; only ₹${"%.2f".format(releasable)} is releasable now — " +
+                    "the hold grew or the terms changed since the request was made, so re-request"
+            )
+        }
+
+        val remaining = releasable - amount
+        // RELEASED only when the verified balance is exhausted; otherwise the
+        // shipment stays VERIFIED so the remainder can still be released.
+        val next = if (remaining <= 0.005) FinanceStatus.RELEASED else FinanceStatus.VERIFIED
         val released = st.releasedValue + amount
         conn.update(
-            """UPDATE finance_terms SET status = 'RELEASED', released_value = ?, updated_at = now()
+            """UPDATE finance_terms SET status = ?::finance_status, released_value = ?, updated_at = now()
                WHERE shipment_id = (SELECT id FROM shipments WHERE ref = ?)""",
-            released, ref,
+            next.name, released, ref,
         )
 
         val approveSeq = audit.append(conn, checker, "RELEASE_APPROVED", ref, buildJsonObject {
@@ -171,9 +197,10 @@ class FinanceService(
         webhooks.enqueue(conn, "RELEASE_CERTIFICATE", ref, certificate)
 
         FinanceActionResponse(
-            ref, FinanceStatus.RELEASED, released, st.heldValue,
+            ref, next, released, st.heldValue,
             certificateId = certificate["certificate_id"],
-            message = "released ₹${"%.2f".format(amount)} — certificate issued to the payer",
+            message = if (next == FinanceStatus.RELEASED) "released ₹${"%.2f".format(amount)} — certificate issued to the payer"
+            else "released ₹${"%.2f".format(amount)} — ₹${"%.2f".format(remaining)} of the verified balance remains releasable",
         )
     }
 
@@ -194,18 +221,51 @@ class FinanceService(
             FinanceActionResponse(ref, FinanceStatus.HELD, st.releasedValue, held, message = "held: $reason")
         }
 
-    /** A resolution (credit note, recount) clears the hold and re-opens release. */
-    fun resolve(ref: String, actor: String, note: String): FinanceActionResponse = db.transaction { conn ->
+    /**
+     * A hold is cleared by evidence, not by a note (§5.2: mismatch → hold →
+     * credit note / recount → *rerun match* → release). The reconciliation is
+     * re-run here: if the numbers still support the hold, only an explicit
+     * supervisor override clears it — and that decision is audit-chained with
+     * its reason.
+     */
+    fun resolve(
+        ref: String,
+        actor: String,
+        note: String,
+        override: Boolean = false,
+        overrideReason: String? = null,
+    ): FinanceActionResponse = db.transaction { conn ->
         val st = state(ref) ?: throw StateError("shipment $ref has no finance terms")
         if (st.status != FinanceStatus.HELD) throw StateError("nothing is held on $ref")
+
+        val fresh = matcher.run(ref, atReceipt = true, runBy = actor)
+        if (fresh.heldValue > 0 && !override) {
+            throw StateError(
+                "reconciliation still holds ₹${"%.2f".format(fresh.heldValue)} — attach the corrected " +
+                    "paperwork or recount and reconcile again, or resolve with override=true (audit-chained)",
+            )
+        }
+
         conn.update(
             """UPDATE finance_terms SET status = 'VERIFIED', held_value = 0, updated_at = now()
                WHERE shipment_id = (SELECT id FROM shipments WHERE ref = ?)""", ref,
         )
-        val seq = audit.append(conn, actor, "HOLD_RESOLVED", ref, buildJsonObject { put("note", note) })
-        recordEvent(conn, ref, "RESOLVED", actor, st.heldValue, seq, buildJsonObject { put("note", note) })
+        val seq = audit.append(conn, actor, "HOLD_RESOLVED", ref, buildJsonObject {
+            put("note", note)
+            put("fresh_held_value", fresh.heldValue)
+            if (override) {
+                put("override", true)
+                put("override_reason", overrideReason ?: "")
+            }
+        })
+        recordEvent(conn, ref, "RESOLVED", actor, st.heldValue, seq, buildJsonObject {
+            put("note", note)
+            if (override) put("override", "true")
+        })
         FinanceActionResponse(ref, FinanceStatus.VERIFIED, st.releasedValue, 0.0,
-            message = "hold cleared — release may be requested again")
+            message = if (fresh.heldValue > 0)
+                "hold cleared by override — ₹${"%.2f".format(fresh.heldValue)} the engine still disputes is noted in the audit chain"
+            else "hold cleared — release may be requested again")
     }
 
     fun events(ref: String): List<Map<String, String>> = db.query(
