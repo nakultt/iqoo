@@ -66,6 +66,7 @@ import androidx.compose.material.icons.rounded.AutoAwesome
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import com.veritransit.inspector.ai.InspectorAi
+import com.veritransit.inspector.ai.LlmGateway
 import com.veritransit.inspector.ai.NpuEngine
 import com.veritransit.inspector.data.OfficerAction
 import com.veritransit.inspector.data.Verdict
@@ -573,10 +574,10 @@ private fun NoteDialog(
                         .height(90.dp),
                     cursorBrush = androidx.compose.ui.graphics.SolidColor(VT.Primary),
                 )
-                if (NpuEngine.isReady) {
+                if (LlmGateway.isAvailable) {
                     Spacer(Modifier.height(10.dp))
                     SecondaryButton(
-                        if (drafting) "Drafting on NPU…" else "Draft with on-device AI",
+                        if (drafting) "Drafting…" else "Draft with AI",
                         { draft() },
                         icon = Icons.Rounded.AutoAwesome,
                         modifier = Modifier.fillMaxWidth(),

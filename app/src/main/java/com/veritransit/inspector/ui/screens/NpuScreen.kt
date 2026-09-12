@@ -41,6 +41,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.veritransit.inspector.ai.NpuEngine
+import com.veritransit.inspector.ai.OpenRouterClient
 import com.veritransit.inspector.ui.components.FieldLabel
 import com.veritransit.inspector.ui.components.FlowHeader
 import com.veritransit.inspector.ui.components.FlowScaffold
@@ -158,6 +159,7 @@ fun NpuScreen(onBack: () -> Unit, onToast: (String) -> Unit, onOpenChat: () -> U
                     )
                     SpecRow("Bundle", gib(NpuEngine.BUNDLE_BYTES))
                     SpecRow("Residency", "Auto-release · auto-reload")
+                    SpecRow("Fallback", OpenRouterClient.DISPLAY_NAME + " · OpenRouter")
                 }
             }
 

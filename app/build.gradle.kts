@@ -1,9 +1,27 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization")
 }
+
+/**
+ * Secrets reach the APK through the gitignored `local.properties`, never
+ * through source control — GitHub push protection (rightly) blocks commits
+ * carrying API keys. The telegram-bot module follows the same convention with
+ * its own `secrets.properties`.
+ */
+val localProperties = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) file.inputStream().use { load(it) }
+}
+
+fun buildConfigString(name: String): String =
+    (localProperties.getProperty(name) ?: "")
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
 
 android {
     namespace = "com.veritransit.inspector"
@@ -19,6 +37,8 @@ android {
         versionCode = 2
         versionName = "1.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // OpenRouter cloud fallback; a missing key just disables the cloud leg.
+        buildConfigField("String", "OPENROUTER_API_KEY", "\"${buildConfigString("openrouter.api.key")}\"")
         ndk {
             // Snapdragon only — the GenieX AAR ships ~80 MB of arm64 QNN libs and
             // nothing else; packaging other ABIs just bloats the APK.
@@ -61,6 +81,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     lint {

@@ -65,7 +65,9 @@ import com.veritransit.inspector.ai.ChatSession
 import com.veritransit.inspector.ai.ChatTurn
 import com.veritransit.inspector.ai.EvidenceCamera
 import com.veritransit.inspector.ai.EvidenceViewfinder
+import com.veritransit.inspector.ai.LlmGateway
 import com.veritransit.inspector.ai.NpuEngine
+import com.veritransit.inspector.ai.OpenRouterClient
 import com.veritransit.inspector.ui.components.FlowHeader
 import com.veritransit.inspector.ui.components.NoticeStrip
 import com.veritransit.inspector.ui.components.PulseDot
@@ -76,10 +78,11 @@ import kotlinx.coroutines.launch
 import java.io.File
 
 /**
- * Free-form conversation with the resident model — the same NPU pipeline the
- * inspection steps use, without the structured prompts wrapped around it.
- * Useful for asking the model about a load directly, and for checking it is
- * actually alive before starting an inspection.
+ * Free-form conversation with the model — the same pipeline the inspection
+ * steps use ([LlmGateway]: NPU first, cloud fallback), without the structured
+ * prompts wrapped around it. Useful for asking the model about a load
+ * directly, and for checking it is actually alive before starting an
+ * inspection.
  */
 @Composable
 fun ChatScreen(session: ChatSession, onBack: () -> Unit) {
@@ -126,7 +129,7 @@ fun ChatScreen(session: ChatSession, onBack: () -> Unit) {
     Column(Modifier.fillMaxSize().background(VT.Alabaster)) {
         FlowHeader(
             title = "Chat",
-            subtitle = NpuEngine.DISPLAY_NAME + " · on-device",
+            subtitle = LlmGateway.activeModelLabel,
             onBack = onBack,
             trailing = {
                 if (session.turns.isNotEmpty()) {
@@ -142,7 +145,15 @@ fun ChatScreen(session: ChatSession, onBack: () -> Unit) {
 
         if (!NpuEngine.isReady) {
             Box(Modifier.padding(16.dp)) {
-                NoticeStrip("The model is not loaded. Load it under Settings → On-device AI first.")
+                NoticeStrip(
+                    if (LlmGateway.cloudReady) {
+                        "The on-device model is not loaded — replies come from " +
+                            OpenRouterClient.DISPLAY_NAME + " via OpenRouter until it is."
+                    } else {
+                        "The model is not loaded and no OpenRouter API key is " +
+                            "configured — set openrouter.api.key in local.properties."
+                    },
+                )
             }
         }
 
@@ -219,14 +230,14 @@ fun ChatScreen(session: ChatSession, onBack: () -> Unit) {
         Composer(
             draft = draft,
             onDraft = { draft = it },
-            enabled = NpuEngine.isReady && !session.streaming,
+            enabled = LlmGateway.isAvailable && !session.streaming,
             streaming = session.streaming,
             onAttach = {
                 if (cameraGranted) cameraOpen = !cameraOpen
                 else askCamera.launch(AndroidPermission.permission.CAMERA)
             },
             onSend = ::send,
-            onStop = { NpuEngine.stop() },
+            onStop = { LlmGateway.stop() },
         )
     }
 }
@@ -371,7 +382,7 @@ private fun StreamingBubble(partial: String) {
                 if (partial.isEmpty()) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         PulseDot(VT.Azure, 7.dp)
-                        Text("Running on the NPU…", style = MaterialTheme.typography.bodySmall, color = VT.Muted)
+                        Text("Thinking…", style = MaterialTheme.typography.bodySmall, color = VT.Muted)
                     }
                 } else {
                     Text(partial, style = MaterialTheme.typography.bodyMedium, color = VT.Ink, lineHeight = 21.sp)
@@ -402,8 +413,11 @@ private fun EmptyState() {
         Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Talk to the model", style = MaterialTheme.typography.titleMedium, color = VT.Ink)
             Text(
-                "Everything you type stays on the handset — prompt, photo and reply " +
-                    "all run through the Hexagon NPU with no network call.",
+                "By default every prompt, photo and reply runs through the " +
+                    "Hexagon NPU and never leaves the handset. When the on-device " +
+                    "model is not loaded, the conversation falls back to " +
+                    OpenRouterClient.DISPLAY_NAME + " on OpenRouter — that turn's " +
+                    "prompt and photo are sent to it.",
                 style = MaterialTheme.typography.bodySmall,
                 color = VT.Muted,
                 lineHeight = 19.sp,

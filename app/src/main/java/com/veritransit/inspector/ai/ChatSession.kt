@@ -22,14 +22,17 @@ data class ChatTurn(
 }
 
 /**
- * A free-form conversation with the on-device model, kept inside the bundle's
+ * A free-form conversation with the model, kept inside the on-device bundle's
  * context window.
  *
  * The whole transcript is re-sent on every turn, so it has to be trimmed here —
  * there is no server-side session to lean on, and overflowing the window does
  * not degrade gracefully, it fails the generate call. The trim budget tracks
  * [NpuEngine.effectiveContextTokens], and sliding-window attention stays armed
- * underneath as a second net.
+ * underneath as a second net. The cloud fallback could take a much longer
+ * transcript, but the trim is deliberately kept: it bounds what a fallback
+ * turn can leak off the handset in one shot, and it keeps estimator drift
+ * corrections meaningful across both backends.
  */
 @Stable
 class ChatSession {
@@ -88,7 +91,7 @@ class ChatSession {
                     else estimateTokens(content.text.orEmpty()).toLong()
                 }
             }
-            NpuEngine.converse(
+            LlmGateway.converse(
                 turns = history,
                 mediaTurn = mediaTurn,
                 maxTokens = REPLY_TOKENS,
@@ -97,12 +100,14 @@ class ChatSession {
                     pending = builder.toString()
                 },
             ).onSuccess { reply ->
-                val profile = NpuEngine.lastProfile
-                if (profile != null && profile.promptTokens > 0) {
+                val measured = LlmGateway.lastPromptTokens
+                if (measured > 0) {
                     // Both anchors commit together, so the drift term is
                     // always measured-vs-predicted for one and the same
-                    // exchange.
-                    measuredPromptTokens = profile.promptTokens
+                    // exchange. The NPU profile and the OpenRouter usage
+                    // report both feed this — which backend answered is
+                    // irrelevant, the anchor is token-count vs estimate.
+                    measuredPromptTokens = measured
                     predictedPromptTokens = predicted
                     Log.i(
                         TAG,
@@ -114,9 +119,7 @@ class ChatSession {
                     ChatTurn(
                         role = ChatTurn.Role.ASSISTANT,
                         text = reply.trim().ifEmpty { "(no reply)" },
-                        stats = profile?.let {
-                            "%.0f tok/s · %d tokens".format(it.decodingSpeed, it.generatedTokens)
-                        },
+                        stats = LlmGateway.lastStats,
                     ),
                 )
             }.onFailure {
@@ -186,9 +189,11 @@ class ChatSession {
         const val TAG = "ChatSession"
 
         const val SYSTEM_PROMPT =
-            "You are a helpful assistant running entirely on this phone's " +
-                "Snapdragon NPU. Answer briefly and directly. When shown an " +
-                "image, describe only what is actually in it."
+            "You are a helpful assistant for a transit compliance officer, running " +
+                "on this phone's Snapdragon NPU — or, when the on-device model is " +
+                "unavailable, on a cloud model reached through OpenRouter. Answer " +
+                "briefly and directly. When shown an image, describe only what is " +
+                "actually in it."
 
         /** Tokens of the window left for the prompt, so a reply always fits. */
         fun contextBudget(): Int =

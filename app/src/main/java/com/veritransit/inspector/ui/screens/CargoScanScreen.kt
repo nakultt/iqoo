@@ -62,6 +62,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.veritransit.inspector.ai.EvidenceCamera
+import com.veritransit.inspector.ai.LlmGateway
 import com.veritransit.inspector.ai.EvidenceViewfinder
 import com.veritransit.inspector.ai.InspectorAi
 import com.veritransit.inspector.ai.NpuEngine
@@ -103,7 +104,7 @@ fun CargoScanScreen(
     val askCamera = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         cameraGranted = it
     }
-    val live = NpuEngine.isReady && cameraGranted && manifest != null
+    val live = LlmGateway.isAvailable && cameraGranted && manifest != null
     var counting by remember { mutableStateOf(false) }
     var scanError by remember { mutableStateOf<String?>(null) }
 
@@ -179,7 +180,7 @@ fun CargoScanScreen(
                     EvidenceViewfinder(camera, Modifier.fillMaxSize())
                 }
                 PrimaryButton(
-                    text = if (counting) "Counting on NPU…" else "Capture cargo bay",
+                    text = if (counting) "Counting…" else "Capture cargo bay",
                     onClick = ::captureAndCount,
                     enabled = camera.ready && !counting,
                 )
@@ -198,10 +199,11 @@ fun CargoScanScreen(
                     Column {
                         Text("Reconciling consignment", style = MaterialTheme.typography.titleMedium, color = VT.Ink)
                         Text(
-                            if (flow.reconciledByAi) {
-                                "Qwen3-VL vision count against declared manifest"
-                            } else {
-                                "Optical match against declared manifest"
+                            when {
+                                !flow.reconciledByAi -> "Optical match against declared manifest"
+                                LlmGateway.lastBackend == LlmGateway.Backend.CLOUD ->
+                                    "GLM-5.3-Flash vision count against declared manifest"
+                                else -> "Qwen3-VL vision count against declared manifest"
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = VT.Muted,
@@ -210,7 +212,12 @@ fun CargoScanScreen(
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                             PulseDot(VT.Azure, 7.dp)
                             Text(
-                                if (flow.reconciledByAi) "NPU · HTP0" else "SCANNER LIVE",
+                                when {
+                                    !flow.reconciledByAi -> "SCANNER LIVE"
+                                    LlmGateway.lastBackend == LlmGateway.Backend.CLOUD ->
+                                        "GLM-5.3-FLASH · CLOUD"
+                                    else -> "NPU · HTP0"
+                                },
                                 style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.SemiBold, fontSize = 10.5.sp, letterSpacing = 0.08.sp),
                                 color = VT.Azure,
                             )

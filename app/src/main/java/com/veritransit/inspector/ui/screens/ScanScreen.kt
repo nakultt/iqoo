@@ -79,6 +79,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.veritransit.inspector.ai.EvidenceCamera
+import com.veritransit.inspector.ai.LlmGateway
 import com.veritransit.inspector.ai.EvidenceViewfinder
 import com.veritransit.inspector.ai.InspectorAi
 import com.veritransit.inspector.ai.NpuEngine
@@ -232,9 +233,10 @@ private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedba
         cameraGranted = it
     }
 
-    // The live path needs both halves: a resident model and a camera to feed it.
-    // Without either, the frame stays the scripted demo scene.
-    val live = NpuEngine.isReady && cameraGranted
+    // The live path needs both halves: a reachable model (NPU or the cloud
+    // fallback) and a camera to feed it. Without either, the frame stays the
+    // scripted demo scene.
+    val live = LlmGateway.isAvailable && cameraGranted
     var reading by remember { mutableStateOf(false) }
     var readError by remember { mutableStateOf<String?>(null) }
 
@@ -295,10 +297,11 @@ private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedba
     LaunchedEffect(flow.detected) {
         if (flow.detected) {
             feedback(
-                if (flow.manifestFromAi) {
-                    "E-Way Bill read on-device · NPU"
-                } else {
-                    "Manifest resolved · E-Way Bill locked"
+                when {
+                    !flow.manifestFromAi -> "Manifest resolved · E-Way Bill locked"
+                    LlmGateway.lastBackend == LlmGateway.Backend.CLOUD ->
+                        "E-Way Bill read · GLM-5.3-Flash (cloud)"
+                    else -> "E-Way Bill read on-device · NPU"
                 },
             )
             onDetected()
@@ -419,7 +422,7 @@ private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedba
         Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
             Text(
                 when {
-                    reading -> "Reading document on the NPU…"
+                    reading -> "Reading document…"
                     flow.detected -> "Manifest captured"
                     live -> "Fill the frame with the E-Way Bill"
                     else -> "Align QR code or barcode within frame"
