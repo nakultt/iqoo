@@ -114,7 +114,7 @@ class EvidenceCamera {
 
 /**
  * Live viewfinder bound to the composition's lifecycle. The preview is the
- * officer's framing aid; the still that reaches the model comes from a separate
+ * receiver's framing aid; the still that reaches the model comes from a separate
  * full-resolution capture so framing quality does not cap OCR quality.
  *
  * [analyzer], when given, is bound alongside the preview as an ImageAnalysis
@@ -196,8 +196,8 @@ fun EvidenceViewfinder(
  * then centre-crops a [size]x[size] square into [out].
  *
  * Filling the square edge to edge keeps full resolution on the middle of the
- * frame, which is what a photograph of a cargo bay wants — the subject is in
- * the centre and the edges are bay wall. Use [squareFit] for anything where
+ * frame, which is what a photograph of a delivery on the dock wants — the subject is in
+ * the centre and the edges are dock floor. Use [squareFit] for anything where
  * losing the edges loses content.
  */
 /**

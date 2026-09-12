@@ -37,15 +37,15 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.veritransit.inspector.data.InspectionRecord
+import com.veritransit.inspector.data.ReceivingRecord
 import com.veritransit.inspector.data.Repo
 import com.veritransit.inspector.data.relativeLabel
+import com.veritransit.inspector.ui.components.OutcomeChip
 import com.veritransit.inspector.ui.components.PulseDot
 import com.veritransit.inspector.ui.components.PrimaryButton
 import com.veritransit.inspector.ui.components.SecondaryButton
 import com.veritransit.inspector.ui.components.SectionLabel
 import com.veritransit.inspector.ui.components.VTCard
-import com.veritransit.inspector.ui.components.VerdictChip
 import com.veritransit.inspector.ui.components.stagger
 import com.veritransit.inspector.ui.theme.Mono
 import com.veritransit.inspector.ui.theme.VT
@@ -54,10 +54,10 @@ import com.veritransit.inspector.ui.theme.mono
 @Composable
 fun HomeScreen(
     now: Long,
-    onStartInspection: () -> Unit,
+    onStartReceiving: () -> Unit,
     onLookup: () -> Unit,
     onOpenRecord: (String) -> Unit,
-    onOpenShiftLogs: () -> Unit,
+    onOpenReceipts: () -> Unit,
 ) {
     Column(
         Modifier
@@ -72,19 +72,19 @@ fun HomeScreen(
         StatusCard(Modifier.padding(horizontal = 16.dp))
         Spacer(Modifier.height(18.dp))
         Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            PrimaryButton("Start Inspection", onStartInspection, icon = Icons.Rounded.QrCodeScanner)
-            SecondaryButton("Lookup E-Way Bill", onLookup, icon = Icons.Rounded.Search, modifier = Modifier.fillMaxWidth())
+            PrimaryButton("Start Receiving", onStartReceiving, icon = Icons.Rounded.QrCodeScanner)
+            SecondaryButton("Lookup Packing List", onLookup, icon = Icons.Rounded.Search, modifier = Modifier.fillMaxWidth())
         }
         Spacer(Modifier.height(24.dp))
         SectionLabel(
-            "Recent Inspections",
+            "Recent Receipts",
             Modifier.padding(horizontal = 16.dp),
             trailing = {
                 Text(
-                    "Shift Logs",
+                    "Receipt Log",
                     style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Medium, fontSize = 12.sp),
                     color = VT.Muted,
-                    modifier = Modifier.clickable(onClick = onOpenShiftLogs),
+                    modifier = Modifier.clickable(onClick = onOpenReceipts),
                 )
             },
         )
@@ -97,7 +97,6 @@ fun HomeScreen(
         }
     }
 }
-
 @Composable
 private fun Header() {
     Row(
@@ -120,15 +119,15 @@ private fun Header() {
         Column(Modifier.weight(1f)) {
             Text("VeriTransit", style = MaterialTheme.typography.titleLarge, color = VT.Ink)
             Text(
-                "FIELD PORTAL",
+                "RECEIVING",
                 style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Medium, fontSize = 10.5.sp, letterSpacing = 0.12.sp),
                 color = VT.Muted,
             )
         }
         Column(horizontalAlignment = Alignment.End) {
-            Text(Repo.INSPECTOR, style = MaterialTheme.typography.titleSmall, color = VT.Ink)
+            Text(Repo.RECEIVER, style = MaterialTheme.typography.titleSmall, color = VT.Ink)
             Text(
-                "Badge ${Repo.BADGE}",
+                Repo.WAREHOUSE,
                 style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Medium, fontSize = 11.sp),
                 color = VT.Muted,
             )
@@ -165,15 +164,15 @@ private fun StatusCard(modifier: Modifier = Modifier) {
                     color = VT.Emerald,
                 )
                 Spacer(Modifier.weight(1f))
-                Text(Repo.STATION, style = MaterialTheme.typography.bodyMedium, color = VT.Slate)
+                Text(Repo.WAREHOUSE, style = MaterialTheme.typography.bodyMedium, color = VT.Slate)
             }
             Spacer(Modifier.height(14.dp))
             Box(Modifier.fillMaxWidth().height(1.dp).background(VT.Hairline))
             Spacer(Modifier.height(14.dp))
             Row(Modifier.fillMaxWidth()) {
                 Stat("TOTAL", animatedCount(Repo.total), VT.Ink, "This shift", Modifier.weight(1f))
-                Stat("PASSED", animatedCount(Repo.passed), VT.Emerald, "Cleared", Modifier.weight(1f))
-                Stat("FLAGGED", animatedCount(Repo.flagged), VT.AmberDot, "Discrepant", Modifier.weight(1f))
+                Stat("ACCEPTED", animatedCount(Repo.accepted), VT.Emerald, "Booked in", Modifier.weight(1f))
+                Stat("FLAGGED", animatedCount(Repo.flagged), VT.AmberDot, "On hold", Modifier.weight(1f))
             }
         }
     }
@@ -195,19 +194,19 @@ private fun Stat(label: String, value: Int, color: Color, sub: String, modifier:
 }
 
 @Composable
-private fun RecentCard(record: InspectionRecord, now: Long, index: Int, anim: Modifier, onOpen: (String) -> Unit) {
+private fun RecentCard(record: ReceivingRecord, now: Long, index: Int, anim: Modifier, onOpen: (String) -> Unit) {
     VTCard(modifier = anim.fillMaxWidth().clickable { onOpen(record.id) }) {
         Column(Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(record.ewb, style = mono().data, color = VT.Ink)
+                Text(record.id, style = mono().data, color = VT.Ink)
                 Spacer(Modifier.weight(1f))
-                VerdictChip(record.verdict)
+                OutcomeChip(record.outcome)
             }
             Spacer(Modifier.height(8.dp))
-            Text(record.vehicle, style = mono().dataSmall, color = VT.Ink)
+            Text(record.purchaseOrderId, style = mono().dataSmall, color = VT.Ink)
             Spacer(Modifier.height(5.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(record.cargo, style = MaterialTheme.typography.bodySmall, color = VT.Slate, modifier = Modifier.weight(1f))
+                Text("${record.supplier} · ${record.goods}", style = MaterialTheme.typography.bodySmall, color = VT.Slate, modifier = Modifier.weight(1f))
                 Spacer(Modifier.width(8.dp))
                 Text(relativeLabel(now, record.timestamp), style = MaterialTheme.typography.bodySmall, color = VT.Muted)
             }

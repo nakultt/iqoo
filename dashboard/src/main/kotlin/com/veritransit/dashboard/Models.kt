@@ -30,80 +30,90 @@ object EvidenceSerializer : KSerializer<ByteArray?> {
 }
 
 /**
- * Domain model — mirrors the inspector app's data layer and the telegram-bot's
- * copy, so all three surfaces tell the same story for every consignment. Kept
+ * Domain model — mirrors the receiving app's data layer and the telegram-bot's
+ * copy, so all three surfaces tell the same story for every delivery. Kept
  * dependency-free apart from the JSON annotations used by the ingest API.
  */
-enum class Verdict { PASSED, REVIEW, PENDING }
+enum class ReceiptOutcome { OK, SHORT, OVER, MISMATCH, PENDING }
 
-enum class ItemStatus { MATCHED, SHORTAGE, OVERAGE, UNLISTED }
+enum class ItemStatus { MATCHED, SHORT, OVER, UNLISTED, DAMAGED }
 
 @Serializable
-data class CargoItem(
+data class PackingItem(
+    val sku: String = "",
     val name: String,
     val detail: String = "",
     val expected: Int = 0,
-    val found: Int = 0,
+    val received: Int = 0,
+    val damaged: Int = 0,
 ) {
     val status: ItemStatus
         get() = when {
-            expected <= 0 && found > 0 -> ItemStatus.UNLISTED
-            found > expected -> ItemStatus.OVERAGE
-            found < expected -> ItemStatus.SHORTAGE
+            // Goods with no declared line at all: the packing list never
+            // mentioned them, so there is no expectation to compare against.
+            expected <= 0 && received > 0 -> ItemStatus.UNLISTED
+            damaged > 0 -> ItemStatus.DAMAGED
+            received > expected -> ItemStatus.OVER
+            received < expected -> ItemStatus.SHORT
             else -> ItemStatus.MATCHED
         }
+
+    /** Signed difference between received and packed, for the short/over chips. */
+    val delta: Int get() = received - expected
 }
 
+/**
+ * Goods-received note: a supplier packed against a purchase order and a
+ * packing list, the warehouse booked what actually arrived.
+ */
 @Serializable
-data class InspectionRecord(
+data class ReceivingRecord(
     val id: String,
-    val ewb: String,
-    val vehicle: String,
-    @SerialName("vehicle_model") val vehicleModel: String = "",
-    val cargo: String = "",
-    val route: String = "",
-    @SerialName("distance_km") val distanceKm: Int = 0,
-    val verdict: Verdict,
+    @SerialName("purchase_order") val purchaseOrderId: String = "",
+    @SerialName("packing_list") val packingListId: String = "",
+    val supplier: String = "",
+    val goods: String = "",
+    val dock: String = "",
+    val carrier: String = "",
+    val outcome: ReceiptOutcome = ReceiptOutcome.PENDING,
     val timestamp: Long = 0L,
-    val items: List<CargoItem> = emptyList(),
+    val items: List<PackingItem> = emptyList(),
     val confidence: Float = 0f,
     val note: String = "",
-    val inspector: String = INSPECTOR,
-    val badge: String = BADGE,
-    val station: String = STATION,
-    // Proof frames from the field camera, carried as base64 JPEG on the wire
+    val receiver: String = RECEIVER,
+    val warehouse: String = WAREHOUSE,
+    // Proof frames from the dock camera, carried as base64 JPEG on the wire
     // and embedded into the PDF report as-is. Absent on seeded records.
     @Serializable(with = EvidenceSerializer::class)
-    @SerialName("bill_evidence") val billEvidence: ByteArray? = null,
+    @SerialName("list_evidence") val listEvidence: ByteArray? = null,
     @Serializable(with = EvidenceSerializer::class)
-    @SerialName("cargo_evidence") val cargoEvidence: ByteArray? = null,
+    @SerialName("dock_evidence") val dockEvidence: ByteArray? = null,
 ) {
-    val flagged: Boolean get() = verdict == Verdict.REVIEW
+    val flagged: Boolean get() = outcome != ReceiptOutcome.OK && outcome != ReceiptOutcome.PENDING
     val discrepancyCount: Int get() = items.count { it.status != ItemStatus.MATCHED }
     val totalUnits: Int get() = items.filter { it.expected > 0 }.sumOf { it.expected }
 
     companion object {
-        const val STATION = "NH-48 Tollgate"
-        const val INSPECTOR = "Insp. S. Jenkins"
-        const val BADGE = "#412"
+        const val WAREHOUSE = "Central Warehouse"
+        const val RECEIVER = "Goods-In Clerk"
     }
 }
 
 /**
- * What a verdict means downstream: released consignments are on the road and
- * their invoices are clear for payment; flagged ones hold the gate and the
- * payment; pending ones are simply waiting.
+ * What a receipt outcome means downstream: an accepted delivery is booked into
+ * stock and its invoice is clear for payment; a flagged one is held on the dock
+ * and the payment is not; a pending one is simply still being counted.
  */
 enum class ShipState(val label: String, val paymentLabel: String, val paymentOk: Boolean) {
-    SHIPPED("Shipped", "OK TO PAY", true),
-    HELD("Held at gate", "DO NOT PAY", false),
-    AWAITING("Awaiting inspection", "PAYMENT ON HOLD", false);
+    SHIPPED("Accepted", "OK TO PAY", true),
+    HELD("Held on dock", "DO NOT PAY", false),
+    AWAITING("Awaiting count", "PAYMENT ON HOLD", false);
 
     companion object {
-        fun of(verdict: Verdict): ShipState = when (verdict) {
-            Verdict.PASSED -> SHIPPED
-            Verdict.REVIEW -> HELD
-            Verdict.PENDING -> AWAITING
+        fun of(outcome: ReceiptOutcome): ShipState = when (outcome) {
+            ReceiptOutcome.OK -> SHIPPED
+            ReceiptOutcome.PENDING -> AWAITING
+            else -> HELD
         }
     }
 }

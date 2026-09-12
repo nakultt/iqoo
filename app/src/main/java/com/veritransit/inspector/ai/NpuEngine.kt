@@ -68,7 +68,7 @@ object NpuEngine {
      * Rough on-disk cost of the chipset bundle, for the pre-download prompt.
      * The zip is ~3.0 GB; what the manager actually reports is the sum of the
      * unpacked context binaries, so quote the larger figure rather than have
-     * the progress readout overshoot the number the officer agreed to.
+     * the progress readout overshoot the number the receiver agreed to.
      */
     const val BUNDLE_BYTES = 4_380_000_000L
 
@@ -126,7 +126,7 @@ object NpuEngine {
     var contextFromBundle by mutableStateOf(false)
         private set
 
-    /** Window every prompt budget ([ChatSession], [InspectorAi]) must fit. */
+    /** Window every prompt budget ([ChatSession], [ReceivingAi]) must fit. */
     val effectiveContextTokens: Int get() = bundleContextTokens
 
     enum class Status {
@@ -517,7 +517,7 @@ object NpuEngine {
 
     /**
      * Recovers from [Status.ERROR]: re-probes, then carries on to whichever
-     * step the engine had reached, so the officer is not made to work out
+     * step the engine had reached, so the receiver is not made to work out
      * whether the failure was the download or the load.
      */
     fun retry(context: Context) {
@@ -624,7 +624,7 @@ object NpuEngine {
      * Sliding-window attention stays armed: the caller trims history to the
      * window, but if measurement drift ever lets a longer prompt through, the
      * runtime evicts middle tokens past [SLIDING_N_KEEP] instead of failing
-     * the officer's chat outright. The stateless inspection path ([run]) keeps
+     * the receiver's chat outright. The stateless reading path ([run]) keeps
      * it off — its prompts are exactly budgeted and its OCR quality must not
      * depend on eviction behaviour.
      */

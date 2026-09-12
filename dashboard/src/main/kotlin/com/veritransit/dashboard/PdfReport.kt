@@ -4,7 +4,7 @@ import java.io.ByteArrayOutputStream
 import java.util.Locale
 
 /**
- * Deterministic PDF report for one inspection record — no libraries, no clock,
+ * Deterministic PDF report for one receiving record — no libraries, no clock,
  * no randomness: the same record (evidence frames included) always renders to
  * the exact same bytes, so a report's identity can be checked by hashing it
  * alone. Anything that would vary between runs is simply never read; the
@@ -12,11 +12,11 @@ import java.util.Locale
  *
  * Two A4 pages, hand-built PDF 1.4 with the standard Helvetica fonts (no
  * embedding):
- *   page 1 — record fields, release status, declared cargo with per-line
- *            expected/found, officer remarks;
- *   page 2 — the evidence frames captured in the field (the bill and the cargo
- *            bay, embedded as DCTDecode JPEG XObjects) and a vector bar chart
- *            of declared-vs-found per item.
+ *   page 1 — record fields, receipt status, packing-list lines with per-line
+ *            packed/received, receiver remarks;
+ *   page 2 — the evidence frames captured at the dock (the packing list and the
+ *            delivered goods, embedded as DCTDecode JPEG XObjects) and a vector
+ *            bar chart of packed-vs-received per item.
  *
  * Charts are drawn as plain path/paint operators, and photographs as raw JPEG
  * passes-through, so determinism costs nothing: every byte in the file is a
@@ -41,13 +41,13 @@ object PdfReport {
     private const val BURGUNDY = "0.494 0.082 0.188"
     private const val GREY = "0.780 0.815 0.859"
 
-    /** A JPEG frame the field app captured for this record, ready to embed. */
+    /** A JPEG frame the receiving app captured for this record, ready to embed. */
     internal data class EvidenceImage(val caption: String, val jpeg: ByteArray)
 
-    fun render(r: InspectionRecord): ByteArray {
+    fun render(r: ReceivingRecord): ByteArray {
         val images = buildList {
-            r.billEvidence?.let { add(EvidenceImage("E-Way Bill frame", it)) }
-            r.cargoEvidence?.let { add(EvidenceImage("Cargo bay frame", it)) }
+            r.listEvidence?.let { add(EvidenceImage("Packing list frame", it)) }
+            r.dockEvidence?.let { add(EvidenceImage("Delivered goods frame", it)) }
         }
         val page1 = StringBuilder()
         val page2 = StringBuilder()
@@ -58,41 +58,45 @@ object PdfReport {
 
     // ------------------------------------------------------------------ page 1
 
-    private fun buildPageOne(out: StringBuilder, r: InspectionRecord) {
-        header(out, "VERITRANSIT - INSPECTION & RELEASE REPORT", r.id)
+    private fun buildPageOne(out: StringBuilder, r: ReceivingRecord) {
+        header(out, "VERITRANSIT - GOODS RECEIVED NOTE", r.id)
         var y = PAGE_H - 100f
         fun field(label: String, value: String) {
             text(out, y, "$label:  $value")
             y -= 15f
         }
-        field("Record", r.id)
-        field("E-Way Bill", r.ewb)
-        field("Vehicle", r.vehicle + if (r.vehicleModel.isNotBlank()) " (${r.vehicleModel})" else "")
-        field("Consignment", r.cargo.ifBlank { "Unclassified consignment" })
-        field("Route", r.route + if (r.distanceKm > 0) "  (${r.distanceKm} km)" else "")
-        field("Inspected by", "${r.inspector} (Badge ${r.badge}) - ${r.station}")
-        field("Verdict", r.verdict.name + if (r.confidence > 0f) "   Confidence: ${pct(r.confidence)}" else "")
+        field("GRN", r.id)
+        field("Purchase order", r.purchaseOrderId.ifBlank { "-" })
+        field("Packing list", r.packingListId.ifBlank { "-" })
+        field("Supplier", r.supplier.ifBlank { "Unnamed supplier" })
+        field("Goods", r.goods.ifBlank { "Unclassified goods" })
+        field("Received at", r.dock.ifBlank { "-" } + if (r.carrier.isNotBlank()) "  (${r.carrier})" else "")
+        field("Received by", "${r.receiver} - ${r.warehouse}")
+        field("Receipt outcome", r.outcome.name + if (r.confidence > 0f) "   Confidence: ${pct(r.confidence)}" else "")
 
-        when (ShipState.of(r.verdict)) {
-            ShipState.SHIPPED -> status(out, y, "STATUS: SHIPPED - CLEARED FOR PAYMENT", EMERALD)
-            ShipState.HELD -> status(out, y, "STATUS: HELD AT GATE - DO NOT PAY", CRIMSON)
-            ShipState.AWAITING -> status(out, y, "STATUS: AWAITING INSPECTION - PAYMENT ON HOLD", AMBER)
+        when (ShipState.of(r.outcome)) {
+            ShipState.SHIPPED -> status(out, y, "STATUS: ACCEPTED - CLEARED FOR PAYMENT", EMERALD)
+            ShipState.HELD -> status(out, y, "STATUS: HELD ON DOCK - DO NOT PAY", CRIMSON)
+            ShipState.AWAITING -> status(out, y, "STATUS: AWAITING DOCK COUNT - PAYMENT ON HOLD", AMBER)
         }
         y -= 26f
         rule(out, y + 8f)
         y -= 18f
-        text(out, y, "DECLARED CARGO (${r.items.size} types, ${r.totalUnits} units, " +
+        text(out, y, "PACKING LIST (${r.items.size} lines, ${r.totalUnits} units packed, " +
                 "${r.discrepancyCount} ${if (r.discrepancyCount == 1) "discrepancy" else "discrepancies"})", bold = true)
         y -= 14f
         val itemLines = r.items.mapIndexed { i, item ->
             "  ${i + 1}. ${item.name}" +
+                (if (item.sku.isNotBlank()) " [${item.sku}]" else "") +
                 (if (item.detail.isNotBlank()) " | ${item.detail}" else "") +
-                " | expected ${item.expected} | found ${item.found} | ${item.status}"
+                " | packed ${item.expected} | received ${item.received}" +
+                (if (item.damaged > 0) " | damaged ${item.damaged}" else "") +
+                " | ${item.status}"
         }
         val shown = itemLines.take(18)
         shown.forEach { text(out, y, clip(it, 96), size = 9); y -= 12f }
         if (itemLines.size > shown.size) {
-            text(out, y, "  ... +${itemLines.size - shown.size} more item lines in the vault record", size = 9, rgb = MUTED)
+            text(out, y, "  ... +${itemLines.size - shown.size} more lines in the receipt log", size = 9, rgb = MUTED)
             y -= 12f
         }
         if (r.note.isNotBlank()) {
@@ -104,18 +108,18 @@ object PdfReport {
 
     // ------------------------------------------------------------------ page 2
 
-    private fun buildPageTwo(out: StringBuilder, r: InspectionRecord, images: List<EvidenceImage>) {
-        header(out, "EVIDENCE & RECONCILIATION", r.id)
+    private fun buildPageTwo(out: StringBuilder, r: ReceivingRecord, images: List<EvidenceImage>) {
+        header(out, "EVIDENCE & COUNT", r.id)
 
         var y = PAGE_H - 110f
-        text(out, y, "PROOF FRAMES CAPTURED IN THE FIELD", bold = true)
+        text(out, y, "PROOF FRAMES CAPTURED AT THE DOCK", bold = true)
         y -= 12f
 
         if (images.isEmpty()) {
             text(out, y - 80f, "No evidence frames were captured for this record.", rgb = MUTED)
             y -= 120f
         } else {
-            // Square frames side by side; the field camera emits 512x512.
+            // Square frames side by side; the dock camera emits 512x512.
             val size = 200f
             images.forEachIndexed { index, img ->
                 val x = MARGIN + index * (size + 22f)
@@ -127,34 +131,34 @@ object PdfReport {
 
         rule(out, y)
         y -= 20f
-        text(out, y, "DECLARED VS FOUND — OPTICAL COUNT", bold = true)
+        text(out, y, "PACKED VS RECEIVED", bold = true)
         y -= 18f
 
         // Legend.
-        legend(out, y, 54f, GREY, "Declared")
-        legend(out, y, 140f, EMERALD, "Found (match)")
+        legend(out, y, 54f, GREY, "Packed")
+        legend(out, y, 140f, EMERALD, "Received (match)")
         legend(out, y, 268f, AMBER, "Short / over")
         legend(out, y, 412f, CRIMSON, "Unlisted")
         y -= 16f
 
         val rows = r.items.take(12)
-        val max = maxOf(1, r.items.maxOfOrNull { maxOf(it.expected, it.found) } ?: 1)
+        val max = maxOf(1, r.items.maxOfOrNull { maxOf(it.expected, it.received) } ?: 1)
         val scale = 280f / max
         rows.forEach { item ->
             val label = clip(item.name, 34)
             text(out, y + 1f, label, size = 7)
             bar(out, 232f, y - 1f, item.expected * scale, GREY)
-            val foundRgb = when (item.status) {
+            val receivedRgb = when (item.status) {
                 ItemStatus.MATCHED -> EMERALD
                 ItemStatus.UNLISTED -> CRIMSON
                 else -> AMBER
             }
-            bar(out, 232f, y - 7f, (item.found * scale).coerceAtLeast(if (item.found > 0) 1.5f else 0f), foundRgb)
-            text(out, y + 1f, "${item.expected}/${item.found}", size = 7, x = RIGHT - 40f, rgb = MUTED)
+            bar(out, 232f, y - 7f, (item.received * scale).coerceAtLeast(if (item.received > 0) 1.5f else 0f), receivedRgb)
+            text(out, y + 1f, "${item.expected}/${item.received}", size = 7, x = RIGHT - 40f, rgb = MUTED)
             y -= 19f
         }
         if (r.items.size > rows.size) {
-            text(out, y, "+${r.items.size - rows.size} more items in the vault record", size = 7, rgb = MUTED)
+            text(out, y, "+${r.items.size - rows.size} more lines in the receipt log", size = 7, rgb = MUTED)
         }
         footer(out, r.id)
     }
@@ -216,6 +220,7 @@ object PdfReport {
     internal fun ascii(text: String): String = text
         .replace("→", "->")
         .replace("•", "*")
+        .replace("·", "-")
         .replace("—", "-")
         .replace("–", "-")
         .replace("’", "'")

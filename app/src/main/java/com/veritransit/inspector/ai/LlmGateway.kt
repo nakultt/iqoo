@@ -10,14 +10,14 @@ import java.io.IOException
 /**
  * Routes every AI task in the app to one of two engines: the on-device NPU
  * model (Qwen3-VL) or a fixed cloud model ([OpenRouterClient.MODEL]) over
- * OpenRouter. The officer picks the engine in Settings ([mode]) and the chosen
+ * OpenRouter. The receiver picks the engine in Settings ([mode]) and the chosen
  * leg answers first; the other leg stays in the list as the safety net, so a
  * mid-shift outage (NPU unloaded, no network, rejected key) degrades to an
  * answer from the spare leg instead of a dead screen. Which leg actually
  * answered is always disclosed — [lastBackend] records it and screens surface
  * it rather than claiming "on-device" unconditionally.
  *
- * [InspectorAi] and [ChatSession] call this object instead of [NpuEngine]
+ * [ReceivingAi] and [ChatSession] call this object instead of [NpuEngine]
  * directly, and screens read [isAvailable] rather than `NpuEngine.isReady`, so
  * the task stays possible on a handset that never pulled the ~3 GB bundle (or
  * has no NPU time to spare) as long as the device is online.
@@ -39,7 +39,7 @@ object LlmGateway {
         CLOUD,
     }
 
-    /** Which engine the officer has selected in Settings. */
+    /** Which engine the receiver has selected in Settings. */
     enum class Mode {
         /** On-device NPU first; cloud only as the safety net. */
         LOCAL,
@@ -51,7 +51,7 @@ object LlmGateway {
     /**
      * The selected engine. [Mode.LOCAL] is the default and reproduces the
      * original NPU-first routing exactly; [Mode.CLOUD] promotes the OpenRouter
-     * leg to primary for officers who want the stronger model or have no NPU
+     * leg to primary for receivers who want the stronger model or have no NPU
      * time to spare. Deliberately not persisted: the app keeps all state in
      * memory (see [com.veritransit.inspector.data.Repo]), and a fresh process
      * starting on the private local leg is the safe default.

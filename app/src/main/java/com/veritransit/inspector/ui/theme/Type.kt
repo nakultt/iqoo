@@ -40,7 +40,7 @@ val VTTypography = Typography(
     labelSmall = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Medium, fontSize = 10.5.sp, lineHeight = 14.sp, letterSpacing = 0.06.sp),
 )
 
-/** Machine-verified values: vehicle IDs, EWB numbers, timestamps. */
+/** Machine-verified values: PO and packing-list refs, SKU codes, timestamps. */
 data class MonoStyles(
     val data: TextStyle = TextStyle(fontFamily = Mono, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, letterSpacing = 0.015.sp),
     val dataSmall: TextStyle = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Medium, fontSize = 12.5.sp, lineHeight = 17.sp),
