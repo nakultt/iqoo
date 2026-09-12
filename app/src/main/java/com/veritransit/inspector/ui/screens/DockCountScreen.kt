@@ -37,6 +37,7 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Remove
+import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -64,12 +65,12 @@ import androidx.core.content.ContextCompat
 import com.veritransit.inspector.ai.EvidenceCamera
 import com.veritransit.inspector.ai.LlmGateway
 import com.veritransit.inspector.ai.EvidenceViewfinder
-import com.veritransit.inspector.ai.InspectorAi
+import com.veritransit.inspector.ai.ReceivingAi
 import com.veritransit.inspector.ai.NpuEngine
 import com.veritransit.inspector.ai.OpenRouterClient
-import com.veritransit.inspector.data.CargoItem
 import com.veritransit.inspector.data.ItemStatus
-import com.veritransit.inspector.ui.InspectionFlowState
+import com.veritransit.inspector.data.PackingItem
+import com.veritransit.inspector.ui.ReceivingFlowState
 import com.veritransit.inspector.ui.components.FlowHeader
 import com.veritransit.inspector.ui.components.FlowScaffold
 import com.veritransit.inspector.ui.components.NoticeStrip
@@ -84,13 +85,13 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @Composable
-fun CargoScanScreen(
-    flow: InspectionFlowState,
-    onScanComplete: () -> Unit,
+fun DockCountScreen(
+    flow: ReceivingFlowState,
+    onCountComplete: () -> Unit,
     onBack: () -> Unit,
 ) {
-    val manifest = flow.manifest
-    val total = flow.scannedItems.size
+    val packingList = flow.packingList
+    val total = flow.countedItems.size
     val progress = if (total == 0) 0f else flow.scanProgress / total.toFloat()
 
     val context = LocalContext.current
@@ -105,45 +106,45 @@ fun CargoScanScreen(
     val askCamera = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         cameraGranted = it
     }
-    val live = LlmGateway.isAvailable && cameraGranted && manifest != null
+    val live = LlmGateway.isAvailable && cameraGranted && packingList != null
     var counting by remember { mutableStateOf(false) }
-    var scanError by remember { mutableStateOf<String?>(null) }
+    var countError by remember { mutableStateOf<String?>(null) }
 
-    /** Walks the result list in, one row at a time, then hands over. */
+    /** Walks the counted lines in, one row at a time, then hands over. */
     suspend fun revealAndFinish() {
-        val target = flow.scannedItems.size
+        val target = flow.countedItems.size
         while (flow.scanProgress < target) {
-            delay(if (flow.reconciledByAi) 320 else 760)
+            delay(if (flow.countedByAi) 320 else 760)
             flow.scanProgress++
         }
         delay(820)
-        onScanComplete()
+        onCountComplete()
     }
 
     fun captureAndCount() {
-        val m = manifest ?: return
+        val list = packingList ?: return
         if (counting || !camera.ready) return
         counting = true
-        scanError = null
+        countError = null
         scope.launch {
             try {
                 val frame = camera.capture(context)
                 if (frame == null) {
-                    scanError = camera.error ?: "Camera could not take the shot."
+                    countError = camera.error ?: "Camera could not take the shot."
                     return@launch
                 }
-                flow.cargoEvidence = frame.absolutePath
-                InspectorAi.reconcileCargo(frame.absolutePath, m)
-                    .onSuccess { scan ->
-                        flow.scannedItems = scan.items
-                        flow.aiObservation = scan.observation
-                        flow.aiConfidence = scan.confidence
-                        flow.reconciledByAi = true
-                        flow.reconciledBy = LlmGateway.lastBackend
+                flow.dockEvidence = frame.absolutePath
+                ReceivingAi.countDelivery(frame.absolutePath, list)
+                    .onSuccess { count ->
+                        flow.countedItems = count.items
+                        flow.aiObservation = count.observation
+                        flow.aiConfidence = count.confidence
+                        flow.countedByAi = true
+                        flow.countedBy = LlmGateway.lastBackend
                         flow.scanProgress = 0
                         revealAndFinish()
                     }
-                    .onFailure { scanError = it.message ?: "The model could not read that bay." }
+                    .onFailure { countError = it.message ?: "The model could not read that delivery." }
             } finally {
                 counting = false
             }
@@ -151,13 +152,13 @@ fun CargoScanScreen(
     }
 
     LaunchedEffect(live) {
-        // The live path is officer-driven: it waits for a photo of the bay.
+        // The live path is receiver-driven: it waits for a photo of the delivery.
         // The demo path keeps its scripted walk-through.
         if (live) return@LaunchedEffect
-        if (flow.scanProgress == 0 && flow.scannedItems.isEmpty()) {
+        if (flow.scanProgress == 0 && flow.countedItems.isEmpty()) {
             delay(650)
-            flow.scannedItems = flow.manifest?.let { m ->
-                com.veritransit.inspector.data.Repo.nextScenario(m)
+            flow.countedItems = flow.packingList?.let { l ->
+                com.veritransit.inspector.data.Repo.nextReceivingScenario(l)
             } ?: emptyList()
         }
         revealAndFinish()
@@ -165,13 +166,13 @@ fun CargoScanScreen(
 
     FlowScaffold(bottomBar = null) {
         FlowHeader(
-            title = "Cargo Scan",
-            subtitle = "Optical count",
+            title = "Receive / Count",
+            subtitle = "Dock count",
             onBack = onBack,
             trailing = { StepBadge(3) },
         )
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            if (live && flow.scannedItems.isEmpty()) {
+            if (live && flow.countedItems.isEmpty()) {
                 Box(
                     Modifier
                         .fillMaxWidth()
@@ -183,24 +184,24 @@ fun CargoScanScreen(
                 }
                 if (!NpuEngine.isReady) {
                     NoticeStrip(
-                        "The on-device model is not loaded — the bay photo will " +
+                        "The on-device model is not loaded — the dock photo will " +
                             "be sent to ${OpenRouterClient.DISPLAY_NAME} on OpenRouter.",
                     )
                 }
                 PrimaryButton(
-                    text = if (counting) "Counting…" else "Capture cargo bay",
+                    text = if (counting) "Counting…" else "Capture delivered goods",
                     onClick = ::captureAndCount,
                     enabled = camera.ready && !counting,
                 )
-                scanError?.let { NoticeStrip(it) }
-            } else if (LlmGateway.isAvailable && !cameraGranted && flow.scannedItems.isEmpty()) {
+                countError?.let { NoticeStrip(it) }
+            } else if (LlmGateway.isAvailable && !cameraGranted && flow.countedItems.isEmpty()) {
                 SecondaryButton(
-                    "Enable camera for live reconciliation",
+                    "Enable camera for live counting",
                     { askCamera.launch(AndroidPermission.permission.CAMERA) },
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
-            if (!LlmGateway.isAvailable && flow.scannedItems.isEmpty()) {
+            if (!LlmGateway.isAvailable && flow.countedItems.isEmpty()) {
                 NoticeStrip(
                     "No AI backend — this step runs a scripted demo walkthrough, " +
                         "not a live count.",
@@ -211,13 +212,13 @@ fun CargoScanScreen(
                     ProgressRing(progress, "${flow.scanProgress}", "$total")
                     Spacer(Modifier.width(18.dp))
                     Column {
-                        Text("Reconciling consignment", style = MaterialTheme.typography.titleMedium, color = VT.Ink)
+                        Text("Counting the delivery", style = MaterialTheme.typography.titleMedium, color = VT.Ink)
                         Text(
                             when {
-                                !flow.reconciledByAi -> "Optical match against declared manifest"
-                                flow.reconciledBy == LlmGateway.Backend.CLOUD ->
-                                    "GLM-5.3-Flash vision count against declared manifest"
-                                else -> "Qwen3-VL vision count against declared manifest"
+                                !flow.countedByAi -> "Count against the supplier's packing list"
+                                flow.countedBy == LlmGateway.Backend.CLOUD ->
+                                    "GLM-5.3-Flash vision count against the packing list"
+                                else -> "Qwen3-VL vision count against the packing list"
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = VT.Muted,
@@ -227,8 +228,8 @@ fun CargoScanScreen(
                             PulseDot(VT.Azure, 7.dp)
                             Text(
                                 when {
-                                    !flow.reconciledByAi -> "SCANNER LIVE"
-                                    flow.reconciledBy == LlmGateway.Backend.CLOUD ->
+                                    !flow.countedByAi -> "DOCK SCAN LIVE"
+                                    flow.countedBy == LlmGateway.Backend.CLOUD ->
                                         "GLM-5.3-FLASH · CLOUD"
                                     else -> "NPU · HTP0"
                                 },
@@ -240,15 +241,15 @@ fun CargoScanScreen(
                 }
             }
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                flow.scannedItems.take(flow.scanProgress).forEachIndexed { i, item ->
-                    ScanRow(item, i)
+                flow.countedItems.take(flow.scanProgress).forEachIndexed { i, item ->
+                    CountRow(item, i)
                 }
-                if (!(live && flow.scannedItems.isEmpty()) && (flow.scanProgress < total || total == 0)) {
+                if (!(live && flow.countedItems.isEmpty()) && (flow.scanProgress < total || total == 0)) {
                     VTCard(border = true) {
                         Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                            ScanningDot()
+                            CountingDot()
                             Spacer(Modifier.width(12.dp))
-                            Text("Scanning next parcel…", style = MaterialTheme.typography.bodyMedium, color = VT.Muted)
+                            Text("Counting next line…", style = MaterialTheme.typography.bodyMedium, color = VT.Muted)
                         }
                     }
                 }
@@ -258,12 +259,12 @@ fun CargoScanScreen(
 }
 
 @Composable
-private fun ScanningDot() {
-    val transition = rememberInfiniteTransition(label = "sd")
+private fun CountingDot() {
+    val transition = rememberInfiniteTransition(label = "cd")
     val a by transition.animateFloat(
         0.25f, 1f,
         infiniteRepeatable(tween(650, easing = LinearEasing), RepeatMode.Reverse),
-        label = "sdA",
+        label = "cdA",
     )
     Box(
         Modifier
@@ -298,18 +299,18 @@ private fun ProgressRing(progress: Float, done: String, total: String) {
                 Text(done, style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Bold, fontSize = 22.sp), color = VT.Ink)
                 Text("/$total", style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Medium, fontSize = 13.sp), color = VT.Muted, modifier = Modifier.padding(bottom = 2.dp, start = 1.dp))
             }
-            Text("verified", style = MaterialTheme.typography.bodySmall, color = VT.Muted)
+            Text("counted", style = MaterialTheme.typography.bodySmall, color = VT.Muted)
         }
     }
 }
 
 @Composable
-private fun ScanRow(item: CargoItem, index: Int) {
+private fun CountRow(item: PackingItem, index: Int) {
     val status = item.status
     val bg by animateColorAsState(
         when (status) {
-            ItemStatus.UNLISTED -> Color(0xFFFDF3F3)
-            ItemStatus.OVERAGE -> Color(0xFFFBF3DF)
+            ItemStatus.UNLISTED, ItemStatus.DAMAGED -> Color(0xFFFDF3F3)
+            ItemStatus.SHORT, ItemStatus.OVER -> Color(0xFFFBF3DF)
             else -> VT.Surface
         },
         tween(240), label = "rowBg",
@@ -321,7 +322,7 @@ private fun ScanRow(item: CargoItem, index: Int) {
         animationSpec = spring(dampingRatio = 0.6f, stiffness = 320f),
         label = "pop",
     )
-    VTCard(bg = bg, border = status != ItemStatus.UNLISTED) {
+    VTCard(bg = bg, border = status == ItemStatus.MATCHED) {
         Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier
@@ -330,9 +331,8 @@ private fun ScanRow(item: CargoItem, index: Int) {
                     .background(
                         when (status) {
                             ItemStatus.MATCHED -> VT.EmeraldBg
-                            ItemStatus.SHORTAGE -> VT.AmberBg
-                            ItemStatus.OVERAGE -> VT.AmberBg
-                            ItemStatus.UNLISTED -> VT.CrimsonBg
+                            ItemStatus.SHORT, ItemStatus.OVER -> VT.AmberBg
+                            ItemStatus.UNLISTED, ItemStatus.DAMAGED -> VT.CrimsonBg
                         }
                     ),
                 contentAlignment = Alignment.Center,
@@ -340,38 +340,47 @@ private fun ScanRow(item: CargoItem, index: Int) {
                 Icon(
                     when (status) {
                         ItemStatus.MATCHED -> Icons.Rounded.Check
-                        ItemStatus.SHORTAGE -> Icons.Rounded.Remove
-                        ItemStatus.OVERAGE -> Icons.Rounded.Add
+                        ItemStatus.SHORT -> Icons.Rounded.Remove
+                        ItemStatus.OVER -> Icons.Rounded.Add
                         ItemStatus.UNLISTED -> Icons.Rounded.Close
+                        ItemStatus.DAMAGED -> Icons.Rounded.Warning
                     },
                     null,
                     tint = when (status) {
                         ItemStatus.MATCHED -> VT.Emerald
-                        ItemStatus.SHORTAGE -> VT.AmberDot
-                        ItemStatus.OVERAGE -> VT.AmberDot
-                        ItemStatus.UNLISTED -> VT.Crimson
+                        ItemStatus.SHORT, ItemStatus.OVER -> VT.AmberDot
+                        ItemStatus.UNLISTED, ItemStatus.DAMAGED -> VT.Crimson
                     },
                     modifier = Modifier.size(17.dp),
                 )
             }
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text(item.name, style = MaterialTheme.typography.titleSmall, color = if (status == ItemStatus.UNLISTED) VT.Crimson else VT.Ink)
-                Text(item.detail, style = MaterialTheme.typography.bodySmall, color = VT.Muted)
+                Text(
+                    item.name,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = if (status == ItemStatus.UNLISTED || status == ItemStatus.DAMAGED) VT.Crimson else VT.Ink,
+                )
+                Text(
+                    if (item.sku.isNotBlank()) "${item.sku} · ${item.detail}" else item.detail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = VT.Muted,
+                )
             }
             Spacer(Modifier.width(8.dp))
-            StatusPill(status, item.expected, item.found, Modifier.graphicsLayer { scaleX = pop; scaleY = pop })
+            CountPill(status, item.expected, item.received, item.damaged, Modifier.graphicsLayer { scaleX = pop; scaleY = pop })
         }
     }
 }
 
 @Composable
-fun StatusPill(status: ItemStatus, expected: Int, found: Int, modifier: Modifier = Modifier) {
+fun CountPill(status: ItemStatus, expected: Int, received: Int, damaged: Int = 0, modifier: Modifier = Modifier) {
     val (bg, fg, line, label) = when (status) {
         ItemStatus.MATCHED -> Quadruple(VT.EmeraldBg, VT.Emerald, VT.EmeraldLine, "Matched")
-        ItemStatus.SHORTAGE -> Quadruple(VT.AmberBg, VT.Amber, VT.AmberLine, "Shortage (-${expected - found})")
-        ItemStatus.OVERAGE -> Quadruple(VT.AmberBg, VT.Amber, VT.AmberLine, "Overage (+${found - expected})")
-        ItemStatus.UNLISTED -> Quadruple(VT.CrimsonBg, VT.Crimson, VT.CrimsonLine, "Unlisted (+$found)")
+        ItemStatus.SHORT -> Quadruple(VT.AmberBg, VT.Amber, VT.AmberLine, "Short (-${expected - received})")
+        ItemStatus.OVER -> Quadruple(VT.AmberBg, VT.Amber, VT.AmberLine, "Over (+${received - expected})")
+        ItemStatus.UNLISTED -> Quadruple(VT.CrimsonBg, VT.Crimson, VT.CrimsonLine, "Unlisted (+$received)")
+        ItemStatus.DAMAGED -> Quadruple(VT.CrimsonBg, VT.Crimson, VT.CrimsonLine, "Damaged ($damaged)")
     }
     Box(
         modifier

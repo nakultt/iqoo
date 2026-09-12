@@ -84,11 +84,11 @@ fun SettingsScreen(
         ) {
             Column(Modifier.weight(1f)) {
                 Text("Settings", style = MaterialTheme.typography.headlineLarge, color = VT.Ink)
-                Text("Field console preferences", style = MaterialTheme.typography.bodyMedium, color = VT.Muted)
+                Text("Warehouse & receiving preferences", style = MaterialTheme.typography.bodyMedium, color = VT.Muted)
             }
         }
         VTCard {
-            OfficerCard()
+            ReceiverCard()
         }
         Spacer(Modifier.height(22.dp))
         SectionLabel("Inference")
@@ -105,11 +105,11 @@ fun SettingsScreen(
         Spacer(Modifier.height(10.dp))
         VTCard {
             Column {
-                ToggleRow(Icons.Rounded.VolumeUp, "Scan sound", "Beep on capture & verdict", settings.sound) { settings.sound = it }
+                ToggleRow(Icons.Rounded.VolumeUp, "Count sound", "Beep on capture & receipt", settings.sound) { settings.sound = it }
                 Divider()
                 ToggleRow(Icons.Rounded.Vibration, "Haptic feedback", "Subtle taps on state changes", settings.haptics) { settings.haptics = it }
                 Divider()
-                ToggleRow(Icons.Rounded.Sync, "Auto-sync records", "Upload vault over mobile data", settings.autoSync) { settings.autoSync = it }
+                ToggleRow(Icons.Rounded.Sync, "Auto-sync receipts", "Upload the receipt log over mobile data", settings.autoSync) { settings.autoSync = it }
             }
         }
         Spacer(Modifier.height(22.dp))
@@ -119,7 +119,7 @@ fun SettingsScreen(
             Column {
                 InfoRow("App version", "1.1.0")
                 Divider()
-                InfoRow("Build", "VT-100 · Field Release")
+                InfoRow("Build", "VT-100 · Warehouse Release")
                 Divider()
                 InfoRow(
                     "Data storage",
@@ -146,18 +146,18 @@ fun SettingsScreen(
             }
         }
         Spacer(Modifier.height(26.dp))
-        SecondaryButton("Sign Out", { onToast("Signed out — demo build keeps you at the gate") }, icon = Icons.AutoMirrored.Rounded.Logout, modifier = Modifier.fillMaxWidth())
+        SecondaryButton("Sign Out", { onToast("Signed out — the demo build keeps you on the dock") }, icon = Icons.AutoMirrored.Rounded.Logout, modifier = Modifier.fillMaxWidth())
     }
 }
 
 /**
- * Officer identity — the only place the name, badge and station can be
+ * Receiver identity — the only place the warehouse and receiver name can be
  * changed. [Repo] holds them as observable state so the home header, the
- * signed stamp and the dashboard handoff all follow an edit here; nothing
+ * filed stamp and the dashboard handoff all follow an edit here; nothing
  * personal stays baked into source.
  */
 @Composable
-private fun OfficerCard() {
+private fun ReceiverCard() {
     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
@@ -165,31 +165,31 @@ private fun OfficerCard() {
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
-                    officerInitials(Repo.INSPECTOR),
+                    receiverInitials(Repo.RECEIVER),
                     style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Bold, fontSize = 16.sp),
                     color = Color.White,
                 )
             }
             Spacer(Modifier.width(13.dp))
             Column(Modifier.weight(1f)) {
-                Text("Officer", style = MaterialTheme.typography.titleMedium, color = VT.Ink)
+                Text("Receiver", style = MaterialTheme.typography.titleMedium, color = VT.Ink)
                 Text(
-                    "Badge ${Repo.BADGE} · ${Repo.STATION}",
+                    "${Repo.RECEIVER} · ${Repo.DOCK}",
                     style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Medium, fontSize = 11.5.sp),
                     color = VT.Muted,
                 )
             }
             Icon(Icons.Rounded.Person, null, tint = VT.Faint, modifier = Modifier.size(20.dp))
         }
-        OfficerField("Name", Repo.INSPECTOR) { Repo.INSPECTOR = it }
+        ReceiverField("Receiver name", Repo.RECEIVER) { Repo.RECEIVER = it }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Box(Modifier.weight(1f)) { OfficerField("Badge", Repo.BADGE) { Repo.BADGE = it } }
-            Box(Modifier.weight(2f)) { OfficerField("Station", Repo.STATION) { Repo.STATION = it } }
+            Box(Modifier.weight(1.2f)) { ReceiverField("Warehouse", Repo.WAREHOUSE) { Repo.WAREHOUSE = it } }
+            Box(Modifier.weight(1f)) { ReceiverField("Dock", Repo.DOCK) { Repo.DOCK = it } }
         }
     }
 }
 
-private fun officerInitials(name: String): String {
+private fun receiverInitials(name: String): String {
     val words = name.split(Regex("\\s+")).filter { it.any(Char::isLetterOrDigit) }
     if (words.isEmpty()) return "—"
     val first = words.first().first { it.isLetterOrDigit() }.uppercaseChar()
@@ -202,7 +202,7 @@ private fun officerInitials(name: String): String {
 }
 
 @Composable
-private fun OfficerField(label: String, value: String, onChange: (String) -> Unit) {
+private fun ReceiverField(label: String, value: String, onChange: (String) -> Unit) {
     OutlinedTextField(
         value = value,
         onValueChange = onChange,

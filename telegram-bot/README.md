@@ -1,9 +1,15 @@
-# VeriTransit Container-Check Bot (Telegram)
+# VeriTransit Receiving Bot (Telegram)
 
-Companion service to the **VeriTransit Cargo Inspector** app. Anyone who messages
-the bot — with a question or a receipt — gets the matching container checked
-against the inspection vault shared with the app (same consignments, verdicts,
-and discrepancy reports).
+Companion service to the **VeriTransit Receiving** app. Anyone who messages the
+bot — with a question or a receipt — gets the matching delivery checked against
+the receiving log shared with the app (same deliveries, receipt outcomes, and
+discrepancy reports).
+
+A supplier packs against a purchase order and a packing list; a warehouse
+receives the delivery and books what actually arrived. The bot is a
+goods-receiving helper for B2B trade — it is **not** a GST, customs or legal
+verification tool, holds no statutory authority and integrates with no tax
+system.
 
 The bot runs long-polling against the Telegram Bot API: no webhook, no public
 endpoint, no database. It uses only the JDK HTTP stack + kotlinx-serialization.
@@ -12,16 +18,23 @@ endpoint, no database. It uses only the JDK HTTP stack + kotlinx-serialization.
 
 | You send | The bot does |
 | --- | --- |
-| `EWB-7819-2044` | Full container check: manifest reconciliation, discrepancies, verdict, recommended statutory action |
-| `TN 38 BX 4491` | Checks every inspection of that vehicle (tolerates `tn38bx4491`) |
-| `VT-2024-8841` | Checks by inspection record id |
-| "how did the cereal shipment do?" | Keyword match on cargo / item names → container check |
-| "any flagged consignments?" | List of consignments held for review |
-| "shift stats" | Station summary: inspections, cleared, flagged, pending, flag rate |
-| Receipt photo with an EWB caption | Matches the receipt to the consignment and runs the container check |
-| Text/CSV/JSON receipt file | Downloads the file, scans it for an EWB / vehicle / item references, runs the check |
+| `PO-2025-4471` | Full receipt report: packed vs received per SKU, discrepancies, receipt outcome, recommended action |
+| `PL-2025-4471-A` | Checks the delivery that packing list belongs to (tolerates `pl 2025 4471 a`) |
+| `ELC-2710` | Checks every delivery carrying that SKU |
+| `GRN-2025-8841` | Checks by GRN id |
+| "how did the cereal delivery do?" | Keyword match on goods / supplier / item names → receipt report |
+| "any flagged deliveries?" | List of deliveries held for review |
+| "shift stats" | Warehouse summary: receipts, accepted, flagged, pending, flag rate |
+| Receipt photo with a PO caption | Matches the receipt to the delivery and runs the receiving check |
+| Text/CSV/JSON receipt file | Downloads the file, scans it for PO / packing-list / SKU references, runs the check |
 
 Commands: `/start` `/help` `/check <ref>` `/recent` `/flagged` `/stats`.
+
+## Receipt outcomes
+
+`OK` · `SHORT` · `OVER` · `MISMATCH` (unlisted or damaged goods) · `PENDING`
+(still being counted). The bot recommends a plain warehouse action for each:
+**Accept Delivery / Flag for Review / Request Recount / Not Received**.
 
 ## Run it
 
@@ -56,10 +69,10 @@ rotate it with [@BotFather](https://t.me/BotFather) (`/revoke`).
 ```
 telegram-bot/src/main/kotlin/com/veritransit/inspector/bot/
 ├── BotMain.kt         # entrypoint, long-poll loop, message routing & replies
-├── ContainerCheck.kt  # reference resolution (EWB/vehicle/id/keyword/receipt) + reports
+├── ReceivingCheck.kt  # reference resolution (PO/PL/SKU/GRN/keyword/receipt) + reports
 ├── TelegramClient.kt  # Bot API long-polling, sendMessage, document download
 ├── BotConfig.kt       # token resolution (env / property / gitignored file)
-├── BotData.kt         # seed vault mirroring the app's Repo (demo data)
+├── BotData.kt         # seed log mirroring the app's Repo (demo data)
 └── Models.kt          # domain model shared with the app's data layer
 ```
 

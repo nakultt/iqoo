@@ -24,7 +24,6 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
-import androidx.compose.material.icons.rounded.Gavel
 import androidx.compose.material.icons.rounded.PhotoCamera
 import androidx.compose.material.icons.rounded.Print
 import androidx.compose.material.icons.rounded.QrCodeScanner
@@ -48,17 +47,17 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.veritransit.inspector.data.InspectionRecord
 import com.veritransit.inspector.data.ItemStatus
+import com.veritransit.inspector.data.ReceiptOutcome
+import com.veritransit.inspector.data.ReceivingRecord
 import com.veritransit.inspector.data.Repo
-import com.veritransit.inspector.data.Verdict
 import com.veritransit.inspector.data.relativeLabel
 import com.veritransit.inspector.ui.components.Bounds
 import com.veritransit.inspector.ui.components.EvidenceCanvas
 import com.veritransit.inspector.ui.components.StatusChip
 import com.veritransit.inspector.ui.components.SecondaryButton
 import com.veritransit.inspector.ui.components.VTCard
-import com.veritransit.inspector.ui.components.VerdictChip
+import com.veritransit.inspector.ui.components.OutcomeChip
 import com.veritransit.inspector.ui.components.stagger
 import com.veritransit.inspector.ui.theme.Mono
 import com.veritransit.inspector.ui.theme.VT
@@ -67,7 +66,7 @@ import com.veritransit.inspector.ui.theme.mono
 private enum class Filter { ALL, MATCHED, FLAGGED }
 
 @Composable
-fun RecordsScreen(
+fun ReceiptsScreen(
     now: Long,
     onOpenRecord: (String) -> Unit,
     onToast: (String) -> Unit,
@@ -79,11 +78,19 @@ fun RecordsScreen(
         .filter { r ->
             val pass = when (filter) {
                 Filter.ALL -> true
-                Filter.MATCHED -> r.verdict == Verdict.PASSED
+                Filter.MATCHED -> r.outcome == ReceiptOutcome.OK
                 Filter.FLAGGED -> r.flagged
             }
             val q = query.trim()
-            pass && (q.isEmpty() || r.ewb.contains(q, true) || r.vehicle.contains(q, true) || r.cargo.contains(q, true))
+            pass && (
+                q.isEmpty() ||
+                    r.id.contains(q, true) ||
+                    r.purchaseOrderId.contains(q, true) ||
+                    r.packingListId.contains(q, true) ||
+                    r.supplier.contains(q, true) ||
+                    r.goods.contains(q, true) ||
+                    r.items.any { it.sku.contains(q, true) || it.name.contains(q, true) }
+                )
         }
         .sortedByDescending { it.timestamp }
 
@@ -98,9 +105,9 @@ fun RecordsScreen(
         Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("Inspection Records", style = MaterialTheme.typography.headlineLarge, color = VT.Ink)
+                    Text("Receipts", style = MaterialTheme.typography.headlineLarge, color = VT.Ink)
                     Text(
-                        "Field Authority Vault · ${Repo.total} Total",
+                        "Goods-received log · ${Repo.total} Total",
                         style = MaterialTheme.typography.bodyMedium,
                         color = VT.Muted,
                     )
@@ -113,18 +120,18 @@ fun RecordsScreen(
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        officerInitials(Repo.INSPECTOR),
+                        receiverInitials(Repo.RECEIVER),
                         style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Bold, fontSize = 13.sp),
                         color = Color.White,
                     )
                 }
             }
             Spacer(Modifier.height(14.dp))
-            SearchField(query, onQuery = { query = it }, onScanHint = { onToast("Use the Scan tab to capture a new E-Way Bill") })
+            SearchField(query, onQuery = { query = it }, onScanHint = { onToast("Use the Receive tab to load a new packing list") })
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip("All (${Repo.total})", filter == Filter.ALL, VT.Primary, Color.White) { filter = Filter.ALL }
-                FilterChip("Matched (${Repo.passed})", filter == Filter.MATCHED, VT.Surface, VT.Slate) { filter = Filter.MATCHED }
+                FilterChip("Accepted (${Repo.accepted})", filter == Filter.MATCHED, VT.Surface, VT.Slate) { filter = Filter.MATCHED }
                 FilterChip("Flagged (${Repo.flagged})", filter == Filter.FLAGGED, VT.Surface, VT.Slate, dotColor = VT.AmberDot) { filter = Filter.FLAGGED }
             }
         }
@@ -136,9 +143,9 @@ fun RecordsScreen(
                 filtered.forEachIndexed { i, record ->
                     val anim = Modifier.stagger(i.coerceAtMost(8), record.id)
                     if (record.flagged) {
-                        AuditCard(record, now, anim, onOpenRecord, onToast)
+                        DiscrepancyCard(record, now, anim, onOpenRecord, onToast)
                     } else {
-                        HistoryRow(record, now, anim, onOpenRecord)
+                        ReceiptRow(record, now, anim, onOpenRecord)
                     }
                 }
             }
@@ -161,7 +168,7 @@ private fun SearchField(query: String, onQuery: (String) -> Unit, onScanHint: ()
         Spacer(Modifier.width(9.dp))
         Box(Modifier.weight(1f)) {
             if (query.isEmpty()) {
-                Text("Search by EWB, vehicle, or item…", style = MaterialTheme.typography.bodyMedium, color = VT.Faint)
+                Text("Search by PO, packing list, SKU or supplier…", style = MaterialTheme.typography.bodyMedium, color = VT.Faint)
             }
             BasicTextField(
                 value = query,
@@ -218,7 +225,7 @@ private fun EmptyState(query: String) {
         Icon(Icons.Rounded.Search, null, tint = VT.Faint, modifier = Modifier.size(34.dp))
         Spacer(Modifier.height(10.dp))
         Text(
-            if (query.isBlank()) "No records yet" else "Nothing matches “$query”",
+            if (query.isBlank()) "No receipts yet" else "Nothing matches “$query”",
             style = MaterialTheme.typography.titleMedium,
             color = VT.Slate,
         )
@@ -226,10 +233,10 @@ private fun EmptyState(query: String) {
     }
 }
 
-/** Expanded audit card for flagged consignments — the vault's centerpiece. */
+/** Expanded card for flagged receipts — the log's centerpiece. */
 @Composable
-private fun AuditCard(
-    record: InspectionRecord,
+private fun DiscrepancyCard(
+    record: ReceivingRecord,
     now: Long,
     anim: Modifier,
     onOpenRecord: (String) -> Unit,
@@ -240,23 +247,25 @@ private fun AuditCard(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(8.dp).clip(CircleShape).background(VT.AmberDot))
                 Spacer(Modifier.width(9.dp))
-                Text("AUDIT ${record.id}", style = mono().dataSmall.copy(fontWeight = FontWeight.SemiBold, fontSize = 13.sp), color = VT.Slate)
+                Text(record.id, style = mono().dataSmall.copy(fontWeight = FontWeight.SemiBold, fontSize = 13.sp), color = VT.Slate)
                 Spacer(Modifier.weight(1f))
-                StatusChip("Review Required", VT.AmberBg, VT.Amber, VT.AmberLine)
+                OutcomeChip(record.outcome)
             }
             Spacer(Modifier.height(12.dp))
             Row {
                 Column(Modifier.weight(1f)) {
-                    Text("E-WAY BILL", style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Medium, fontSize = 10.sp, letterSpacing = 0.08.sp), color = VT.Muted)
+                    Text("PURCHASE ORDER", style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Medium, fontSize = 10.sp, letterSpacing = 0.08.sp), color = VT.Muted)
                     Spacer(Modifier.height(3.dp))
-                    Text(record.ewb, style = mono().data, color = VT.Ink)
+                    Text(record.purchaseOrderId, style = mono().data, color = VT.Ink)
                 }
                 Column(horizontalAlignment = Alignment.End) {
-                    Text("VEHICLE", style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Medium, fontSize = 10.sp, letterSpacing = 0.08.sp), color = VT.Muted)
+                    Text("PACKING LIST", style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Medium, fontSize = 10.sp, letterSpacing = 0.08.sp), color = VT.Muted)
                     Spacer(Modifier.height(3.dp))
-                    Text(record.vehicle, style = mono().data, color = VT.Ink)
+                    Text(record.packingListId, style = mono().data, color = VT.Ink)
                 }
             }
+            Spacer(Modifier.height(8.dp))
+            Text("${record.supplier} · ${record.goods}", style = MaterialTheme.typography.bodySmall, color = VT.Slate)
             Spacer(Modifier.height(12.dp))
             Column(
                 Modifier
@@ -271,7 +280,7 @@ private fun AuditCard(
                     Spacer(Modifier.width(7.dp))
                     Text("Discrepancy Summary", style = MaterialTheme.typography.titleSmall, color = Color(0xFF78350F), modifier = Modifier.weight(1f))
                     Text(
-                        if (record.discrepancyCount == 1) "1 item flagged" else "${record.discrepancyCount} items flagged",
+                        if (record.discrepancyCount == 1) "1 line flagged" else "${record.discrepancyCount} lines flagged",
                         style = MaterialTheme.typography.bodySmall,
                         color = VT.Amber,
                     )
@@ -284,9 +293,10 @@ private fun AuditCard(
                     ) {
                         Text(item.name, style = MaterialTheme.typography.bodyMedium, color = VT.Slate, modifier = Modifier.weight(1f))
                         when (item.status) {
-                            ItemStatus.SHORTAGE -> StatusChip("-${item.expected - item.found} Shortage", VT.CrimsonBg, VT.Crimson, VT.CrimsonLine, withDot = false)
-                            ItemStatus.OVERAGE -> StatusChip("+${item.found - item.expected} Overage", VT.AmberBg, VT.Amber, VT.AmberLine, withDot = false)
-                            else -> StatusChip("+${item.found} Unlisted", VT.AmberBg, VT.Amber, VT.AmberLine, withDot = false)
+                            ItemStatus.SHORT -> StatusChip("-${item.expected - item.received} Short", VT.CrimsonBg, VT.Crimson, VT.CrimsonLine, withDot = false)
+                            ItemStatus.OVER -> StatusChip("+${item.received - item.expected} Over", VT.AmberBg, VT.Amber, VT.AmberLine, withDot = false)
+                            ItemStatus.DAMAGED -> StatusChip("${item.damaged} Damaged", VT.CrimsonBg, VT.Crimson, VT.CrimsonLine, withDot = false)
+                            else -> StatusChip("+${item.received} Unlisted", VT.AmberBg, VT.Amber, VT.AmberLine, withDot = false)
                         }
                     }
                 }
@@ -295,8 +305,8 @@ private fun AuditCard(
             Text("EVIDENCE PHOTOS", style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.SemiBold, fontSize = 10.sp, letterSpacing = 0.09.sp), color = VT.Muted)
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-                EvidenceCanvas(Modifier.width(96.dp).height(72.dp), boxes = listOf(Bounds(0.1f, 0.25f, 0.5f, 0.5f, Color(0xFFF43F5E), "NEW")), timestamp = "Cargo Bay")
-                EvidenceCanvas(Modifier.width(96.dp).height(72.dp), boxes = listOf(Bounds(0.2f, 0.2f, 0.6f, 0.55f, Color(0xFFF59E0B), "-1")), timestamp = "Label #4")
+                EvidenceCanvas(Modifier.width(96.dp).height(72.dp), boxes = listOf(Bounds(0.1f, 0.25f, 0.5f, 0.5f, Color(0xFFF43F5E), "NEW")), timestamp = "Dock")
+                EvidenceCanvas(Modifier.width(96.dp).height(72.dp), boxes = listOf(Bounds(0.2f, 0.2f, 0.6f, 0.55f, Color(0xFFF59E0B), "-1")), timestamp = "Carton 4")
                 Box(
                     Modifier
                         .width(96.dp)
@@ -315,8 +325,8 @@ private fun AuditCard(
             }
             Spacer(Modifier.height(14.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(9.dp), verticalAlignment = Alignment.CenterVertically) {
-                if (record.noticeIssued) {
-                    StatusChip("Notice MOV-04 Issued", VT.EmeraldBg, VT.Emerald, VT.EmeraldLine, withDot = false)
+                if (record.grnFiled) {
+                    StatusChip("GRN Filed", VT.EmeraldBg, VT.Emerald, VT.EmeraldLine, withDot = false)
                 } else {
                     Box(
                         Modifier
@@ -325,15 +335,14 @@ private fun AuditCard(
                             .background(VT.Primary)
                             .clickable {
                                 Repo.records[Repo.records.indexOfFirst { it.id == record.id }] =
-                                    record.copy(noticeIssued = true)
-                                onToast("Notice MOV-04 issued & logged")
+                                    record.copy(grnFiled = true)
+                                onToast("Goods-received note ${record.id} filed")
                             }
                             .padding(horizontal = 14.dp, vertical = 12.dp),
                         contentAlignment = Alignment.Center,
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                            Icon(Icons.Rounded.Gavel, null, tint = Color.White, modifier = Modifier.size(16.dp))
-                            Text("Issue Notice MOV-04", style = MaterialTheme.typography.titleSmall, color = Color.White)
+                            Text("File Goods-Received Note", style = MaterialTheme.typography.titleSmall, color = Color.White)
                         }
                     }
                 }
@@ -342,7 +351,7 @@ private fun AuditCard(
                         .clip(RoundedCornerShape(4.dp))
                         .background(VT.Surface)
                         .border(1.dp, VT.Border, RoundedCornerShape(4.dp))
-                        .clickable { onToast("Summary queued for field printer") }
+                        .clickable { onToast("Summary queued for the dock printer") }
                         .padding(horizontal = 14.dp, vertical = 12.dp),
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
@@ -360,7 +369,7 @@ private fun AuditCard(
                     .padding(vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Open full verification trail", style = MaterialTheme.typography.titleSmall, color = VT.Primary, modifier = Modifier.weight(1f))
+                Text("Open full receipt", style = MaterialTheme.typography.titleSmall, color = VT.Primary, modifier = Modifier.weight(1f))
                 Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = VT.Primary, modifier = Modifier.size(18.dp))
             }
         }
@@ -368,31 +377,32 @@ private fun AuditCard(
 }
 
 @Composable
-private fun HistoryRow(record: InspectionRecord, now: Long, anim: Modifier, onOpenRecord: (String) -> Unit) {    VTCard(modifier = anim.fillMaxWidth().clickable { onOpenRecord(record.id) }) {
+private fun ReceiptRow(record: ReceivingRecord, now: Long, anim: Modifier, onOpenRecord: (String) -> Unit) {
+    VTCard(modifier = anim.fillMaxWidth().clickable { onOpenRecord(record.id) }) {
         Row(Modifier.padding(15.dp), verticalAlignment = Alignment.CenterVertically) {
             // Stacked lines, not one Row of Texts: two side-by-side mono
             // strings leave the right-hand text whatever width is left over,
             // and on a narrow handset that collapses it into per-character
             // wrapping.
             Column(Modifier.weight(1f)) {
-                Text(record.vehicle, style = mono().data, color = VT.Ink)
+                Text(record.id, style = mono().data, color = VT.Ink)
                 Spacer(Modifier.height(3.dp))
-                Text(record.ewb, style = mono().dataSmall, color = VT.Muted)
+                Text("${record.purchaseOrderId} · ${record.packingListId}", style = mono().dataSmall, color = VT.Muted)
                 Spacer(Modifier.height(3.dp))
-                Text(record.cargo, style = MaterialTheme.typography.bodySmall, color = VT.Slate)
+                Text("${record.supplier} — ${record.goods}", style = MaterialTheme.typography.bodySmall, color = VT.Slate)
                 Spacer(Modifier.height(3.dp))
                 Text(relativeLabel(now, record.timestamp), style = MaterialTheme.typography.bodySmall, color = VT.Muted)
             }
             Spacer(Modifier.width(10.dp))
-            VerdictChip(record.verdict)
+            OutcomeChip(record.outcome)
             Spacer(Modifier.width(4.dp))
             Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = VT.Faint, modifier = Modifier.size(20.dp))
         }
     }
 }
 
-/** Avatar initials derived from the editable officer name — no fixed string. */
-private fun officerInitials(name: String): String {
+/** Avatar initials derived from the editable receiver name — no fixed string. */
+private fun receiverInitials(name: String): String {
     val words = name.split(Regex("\\s+")).filter { it.any(Char::isLetterOrDigit) }
     if (words.isEmpty()) return "—"
     val first = words.first().first { it.isLetterOrDigit() }.uppercaseChar()

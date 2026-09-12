@@ -5,10 +5,10 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.veritransit.inspector.MainActivity
-import com.veritransit.inspector.data.CargoItem
-import com.veritransit.inspector.data.InspectionRecord
-import com.veritransit.inspector.data.Manifest
-import com.veritransit.inspector.data.Verdict
+import com.veritransit.inspector.data.PackingItem
+import com.veritransit.inspector.data.PackingList
+import com.veritransit.inspector.data.ReceiptOutcome
+import com.veritransit.inspector.data.ReceivingRecord
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
@@ -34,103 +34,105 @@ import java.io.File
 class NpuInferenceTest {
 
     @Test
-    fun readsEwayBillFromAPhotograph() = runBlocking<Unit> {
+    fun readsPackingListFromAPhotograph() = runBlocking<Unit> {
         assumeTrue("model not resident", NpuEngine.isReady)
 
         val frame = croppedSample()
-        val reading = InspectorAi.readEwayBill(frame.absolutePath)
-        Log.i(TAG, "bill reading: ${reading.getOrNull()}")
-        val bill = reading.getOrThrow()
+        val reading = ReceivingAi.readPackingList(frame.absolutePath)
+        Log.i(TAG, "packing-list reading: ${reading.getOrNull()}")
+        val list = reading.getOrThrow()
 
-        // The fixture prints EWB-7819-2044-8831 on a TN 38 BX 4491 Tata 407,
-        // dispatched from Chennai — and no goods table (header-only bill), so
-        // the honest OCR result is populated header fields and no line items.
-        assertTrue("model judged the fixture illegible", bill.legible)
-        val ewbDigits = bill.ewb.filter { it.isDigit() }
+        // The fixture prints the supplier's packing list with its purchase
+        // order and packing-list references — and no goods table, so the honest
+        // OCR result is populated header fields and no line items.
+        assertTrue("model judged the fixture illegible", list.legible)
         assertTrue(
-            "EWB number missed: '${bill.ewb}'",
-            listOf("7819", "2044", "8831").all { it in ewbDigits },
+            "purchase order missed: '${list.purchaseOrderId}'",
+            list.purchaseOrderId.filter { it.isDigit() }.contains("4471"),
         )
-        val vehicle = bill.vehicle.replace(" ", "").uppercase()
-        assertTrue("vehicle number missed: '${bill.vehicle}'", vehicle.contains("TN38BX") && vehicle.contains("4491"))
-        assertTrue("vehicle model missed: '${bill.vehicleModel}'", bill.vehicleModel.contains("Tata", ignoreCase = true))
+        assertTrue(
+            "packing list reference missed: '${list.packingListId}'",
+            list.packingListId.isNotBlank(),
+        )
+        assertTrue(
+            "supplier name missed: '${list.supplier}'",
+            list.supplier.contains("Bright", ignoreCase = true),
+        )
         // The fixture prints no goods rows, so a populated items list means
         // the model invented them — exactly the hallucination a record must
         // never inherit.
-        assertTrue("model invented goods rows on a header-only bill: ${bill.items}", bill.items.isEmpty())
-        Log.i(TAG, "origin read as: '${bill.origin}'")
+        assertTrue("model invented packed lines on a header-only list: ${list.items}", list.items.isEmpty())
     }
 
     @Test
-    fun countsCargoAgainstAManifest() = runBlocking<Unit> {
+    fun countsDeliveredGoodsAgainstAPackingList() = runBlocking<Unit> {
         assumeTrue("model not resident", NpuEngine.isReady)
 
-        val manifest = Manifest(
-            ewb = "EWB-7819-2044-8831",
-            vehicle = "TN 38 BX 4491",
-            vehicleModel = "Tata 407 LCV",
-            consignment = "Consumer Electronics",
-            route = "Chennai → Coimbatore",
-            distanceKm = 498,
+        val packingList = PackingList(
+            purchaseOrderId = "PO-2025-4471",
+            packingListId = "PL-2025-4471-A",
+            supplier = "Bright Electronics Pvt Ltd",
+            goods = "Consumer Electronics",
+            dock = "Dock 3 · Central DC",
+            carrier = "BlueDart Surface",
             items = listOf(
-                CargoItem("Dell UltraSharp 27\" Monitor", "Factory Boxed", 3, 3),
-                CargoItem("Logitech Mechanical Keyboard", "Bulk Carton", 4, 4),
+                PackingItem("ELC-2710", "Dell UltraSharp 27\" Monitor", "Factory Boxed", 3, 3),
+                PackingItem("ELC-1180", "Logitech Mechanical Keyboard", "Bulk Carton", 4, 4),
             ),
-            ref = "#8831",
         )
-        val scan = InspectorAi.reconcileCargo(croppedSample().absolutePath, manifest).getOrThrow()
-        Log.i(TAG, "reconciliation: ${scan.items}, observation='${scan.observation}', conf=${scan.confidence}")
+        val count = ReceivingAi.countDelivery(croppedSample().absolutePath, packingList).getOrThrow()
+        Log.i(TAG, "count: ${count.items}, observation='${count.observation}', conf=${count.confidence}")
 
-        // Every declared line must come back, whatever the photo showed — the
-        // mapping is re-keyed against the manifest so nothing can be dropped.
-        assertTrue("declared lines lost", scan.items.count { it.expected > 0 } == manifest.items.size)
+        // Every packed line must come back, whatever the photo showed — the
+        // mapping is re-keyed against the packing list so nothing can be dropped.
+        assertTrue("packed lines lost", count.items.count { it.expected > 0 } == packingList.items.size)
 
-        // The fixture is a photograph of a paper bill, not a loaded bay: the
-        // counts are the model's word, but they must stay inside the scale the
-        // prompt demands, and the observation must actually describe something.
+        // The fixture is a photograph of a paper list, not the delivered goods:
+        // the counts are the model's word, but they must stay inside the scale
+        // the prompt demands, and the observation must actually describe something.
         assertTrue(
-            "counts outside 0..99: ${scan.items.map { it.found }}",
-            scan.items.all { it.found in 0..99 },
+            "counts outside 0..99: ${count.items.map { it.received }}",
+            count.items.all { it.received in 0..99 },
         )
         assertTrue(
-            "confidence outside 0..1: ${scan.confidence}",
-            scan.confidence in 0f..1f,
+            "confidence outside 0..1: ${count.confidence}",
+            count.confidence in 0f..1f,
         )
-        assertTrue("empty observation", scan.observation.isNotBlank())
-        // The fixture is a paper bill, not a loaded bay: whatever the model
-        // lists as unlisted must never include the declared lines themselves.
-        val unlistedNames = scan.items.filter { it.expected == 0 }.map { it.name }
+        assertTrue("empty observation", count.observation.isNotBlank())
+        // The fixture is a paper list, not the delivered goods: whatever the
+        // model lists as unlisted must never include the packed lines themselves.
+        val unlistedNames = count.items.filter { it.expected == 0 }.map { it.name }
         assertTrue(
-            "declared item reappeared as unlisted: $unlistedNames",
-            unlistedNames.none { u -> manifest.items.any { it.name.equals(u, ignoreCase = true) } },
+            "packed item reappeared as unlisted: $unlistedNames",
+            unlistedNames.none { u -> packingList.items.any { it.name.equals(u, ignoreCase = true) } },
         )
-        Log.i(TAG, "unlisted read: ${scan.items.filter { it.expected == 0 }}")
+        Log.i(TAG, "unlisted read: ${count.items.filter { it.expected == 0 }}")
     }
 
     @Test
-    fun draftsOfficerRemarks() = runBlocking<Unit> {
+    fun draftsReceiverNote() = runBlocking<Unit> {
         assumeTrue("model not resident", NpuEngine.isReady)
 
-        val record = InspectionRecord(
-            id = "VT-2025-0001",
-            ewb = "EWB-7819-2044-8831",
-            vehicle = "TN 38 BX 4491",
-            vehicleModel = "Tata 407 LCV",
-            cargo = "Consumer Electronics",
-            route = "Chennai → Coimbatore",
-            distanceKm = 498,
-            verdict = Verdict.REVIEW,
+        val record = ReceivingRecord(
+            id = "GRN-2025-0001",
+            purchaseOrderId = "PO-2025-4471",
+            packingListId = "PL-2025-4471-A",
+            supplier = "Bright Electronics Pvt Ltd",
+            goods = "Consumer Electronics",
+            dock = "Dock 3 · Central DC",
+            carrier = "BlueDart Surface",
+            outcome = ReceiptOutcome.OVER,
             timestamp = System.currentTimeMillis(),
             items = listOf(
-                CargoItem("Dell UltraSharp 27\" Monitor", "Factory Boxed", 3, 3),
-                CargoItem("Logitech Mechanical Keyboard", "Bulk Carton", 4, 3),
-                // Exercises the overage branch of the remarks prompt: declared
-                // 2, seen 5 must reach the note as an over-count, not vanish.
-                CargoItem("Thermal POS Printer", "Not on manifest", 0, 1),
-                CargoItem("HDMI Cable", "Bulk Carton", 2, 5),
+                PackingItem("ELC-2710", "Dell UltraSharp 27\" Monitor", "Factory Boxed", 3, 3),
+                PackingItem("ELC-1180", "Logitech Mechanical Keyboard", "Bulk Carton", 4, 3),
+                // Exercises the unlisted branch of the note prompt: goods the
+                // packing list never declared must reach the note, not vanish.
+                PackingItem("", "Thermal POS Printer", "Not on packing list", 0, 1),
+                PackingItem("HDM-9001", "HDMI Cable", "Bulk Carton", 2, 5),
             ),
         )
-        val note = InspectorAi.draftNote(record).getOrThrow()
+        val note = ReceivingAi.draftNote(record).getOrThrow()
         Log.i(TAG, "drafted note: $note")
         assertTrue("empty note", note.length > 20)
         assertTrue("not prose", note.contains(" "))
@@ -143,12 +145,12 @@ class NpuInferenceTest {
 
     private fun croppedSample(): File {
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext
-        val raw = File(ctx.cacheDir, "eway_bill_sample.jpg")
-        InstrumentationRegistry.getInstrumentation().context.assets.open("eway_bill_sample.jpg")
+        val raw = File(ctx.cacheDir, "packing_list_sample.jpg")
+        InstrumentationRegistry.getInstrumentation().context.assets.open("packing_list_sample.jpg")
             .use { input -> raw.outputStream().use { input.copyTo(it) } }
-        val out = File(ctx.cacheDir, "eway_bill_fitted.jpg")
-        // Same preprocessing the bill screen uses, so the test measures what
-        // the officer actually gets.
+        val out = File(ctx.cacheDir, "packing_list_fitted.jpg")
+        // Same preprocessing the receiving screen uses, so the test measures what
+        // the receiver actually gets.
         return squareFit(raw, out, NpuEngine.VISION_INPUT_PX)
     }
 

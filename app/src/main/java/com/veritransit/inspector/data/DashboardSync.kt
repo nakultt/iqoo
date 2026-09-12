@@ -12,16 +12,16 @@ import java.net.URL
 import java.util.Base64
 
 /**
- * Pushes a committed inspection to the back-office web dashboard (the
- * `:dashboard` module). That call is what flips the consignment's state
- * downstream: the dashboard marks a PASSED verdict "Shipped · OK TO PAY", a
- * REVIEW verdict "Held · DO NOT PAY", and publishes the record's
+ * Pushes a committed receipt to the back-office web dashboard (the
+ * `:dashboard` module). That call is what flips the delivery's state
+ * downstream: the dashboard marks an OK receipt "Accepted · OK TO PAY", a
+ * flagged receipt "Held · DO NOT PAY", and publishes the record's
  * deterministic PDF report either way.
  *
- * Fire-and-forget by design: the statutory copy of the record is the one in
- * [Repo]'s vault, committed before this runs. A dashboard that cannot be
- * reached is reported back for the toast and otherwise changes nothing — the
- * field record never depends on the office being online.
+ * Fire-and-forget by design: the record of truth is the one in [Repo]'s
+ * receipt log, committed before this runs. A dashboard that cannot be reached
+ * is reported back for the toast and otherwise changes nothing — the dock
+ * record never depends on the office being online.
  *
  * The URL comes from `local.properties` (`dashboard.url`, default
  * `http://127.0.0.1:8080`); with `adb reverse tcp:8080 tcp:8080` that points
@@ -36,10 +36,12 @@ object DashboardSync {
 
     @Serializable
     private data class ItemDto(
+        val sku: String,
         val name: String,
         val detail: String,
         val expected: Int,
-        val found: Int,
+        val received: Int,
+        val damaged: Int,
     )
 
     /**
@@ -49,24 +51,23 @@ object DashboardSync {
     @Serializable
     private data class RecordDto(
         val id: String,
-        val ewb: String,
-        val vehicle: String,
-        @kotlinx.serialization.SerialName("vehicle_model") val vehicleModel: String,
-        val cargo: String,
-        val route: String,
-        @kotlinx.serialization.SerialName("distance_km") val distanceKm: Int,
-        val verdict: String,
+        @kotlinx.serialization.SerialName("purchase_order") val purchaseOrderId: String,
+        @kotlinx.serialization.SerialName("packing_list") val packingListId: String,
+        val supplier: String,
+        val goods: String,
+        val dock: String,
+        val carrier: String,
+        val outcome: String,
         val timestamp: Long,
         val items: List<ItemDto>,
         val confidence: Float,
         val note: String,
-        val inspector: String,
-        val badge: String,
-        val station: String,
-        // Proof frames (the exact JPEGs shown on the result screen), base64 —
+        val receiver: String,
+        val warehouse: String,
+        // Proof frames (the exact JPEGs shown on the receipt screen), base64 —
         // the dashboard embeds them into the PDF report as-is.
-        @kotlinx.serialization.SerialName("bill_evidence") val billEvidence: String? = null,
-        @kotlinx.serialization.SerialName("cargo_evidence") val cargoEvidence: String? = null,
+        @kotlinx.serialization.SerialName("list_evidence") val listEvidence: String? = null,
+        @kotlinx.serialization.SerialName("dock_evidence") val dockEvidence: String? = null,
     )
 
     /** Frames are 512px JPEGs (~100 KB); anything wildly larger is skipped. */
@@ -80,29 +81,30 @@ object DashboardSync {
     }
 
     suspend fun push(
-        record: InspectionRecord,
-        billEvidencePath: String? = null,
-        cargoEvidencePath: String? = null,
+        record: ReceivingRecord,
+        listEvidencePath: String? = null,
+        dockEvidencePath: String? = null,
     ): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             val dto = RecordDto(
                 id = record.id,
-                ewb = record.ewb,
-                vehicle = record.vehicle,
-                vehicleModel = record.vehicleModel,
-                cargo = record.cargo,
-                route = record.route,
-                distanceKm = record.distanceKm,
-                verdict = record.verdict.name,
+                purchaseOrderId = record.purchaseOrderId,
+                packingListId = record.packingListId,
+                supplier = record.supplier,
+                goods = record.goods,
+                dock = record.dock,
+                carrier = record.carrier,
+                outcome = record.outcome.name,
                 timestamp = record.timestamp,
-                items = record.items.map { ItemDto(it.name, it.detail, it.expected, it.found) },
+                items = record.items.map {
+                    ItemDto(it.sku, it.name, it.detail, it.expected, it.received, it.damaged)
+                },
                 confidence = record.confidence,
                 note = record.note,
-                inspector = Repo.INSPECTOR,
-                badge = Repo.BADGE,
-                station = Repo.STATION,
-                billEvidence = frame(billEvidencePath),
-                cargoEvidence = frame(cargoEvidencePath),
+                receiver = Repo.RECEIVER,
+                warehouse = Repo.WAREHOUSE,
+                listEvidence = frame(listEvidencePath),
+                dockEvidence = frame(dockEvidencePath),
             )
             val conn = URL(BuildConfig.DASHBOARD_URL.trimEnd('/') + "/api/records")
                 .openConnection() as HttpURLConnection

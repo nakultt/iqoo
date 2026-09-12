@@ -3,9 +3,10 @@ package com.veritransit.inspector.bot
 import kotlin.system.exitProcess
 
 /**
- * VeriTransit container-check bot. Anyone who messages the bot — with a question
- * or a receipt (photo caption or text document) — gets the matching container /
- * consignment checked against the inspection vault.
+ * VeriTransit receiving bot. Anyone who messages the bot — with a question or a
+ * receipt (photo caption or text document) — gets the matching delivery checked
+ * against the receiving log: packed vs received, discrepancies, receipt outcome
+ * and what to do with it.
  */
 fun main(args: Array<String>) {
     val pollOnce = "--poll-once" in args // diagnostics: confirm connectivity, do not reply
@@ -29,7 +30,7 @@ fun main(args: Array<String>) {
         System.err.println("Telegram API unreachable: ${e.message}")
         exitProcess(1)
     }
-    println("VeriTransit container-check bot ready: @${bot.username} (${bot.name})")
+    println("VeriTransit receiving bot ready: @${bot.username} (${bot.name})")
 
     if (pollOnce) {
         val updates = client.pollUpdates()
@@ -60,7 +61,7 @@ fun main(args: Array<String>) {
 
 /** Pure message → reply mapping, kept free of Telegram I/O for testability. */
 class MessageHandler(
-    private val records: List<InspectionRecord>,
+    private val records: List<ReceivingRecord>,
     private val now: () -> Long,
 ) {
 
@@ -82,7 +83,7 @@ class MessageHandler(
             "/start" -> greeting()
             "/help" -> helpText()
             "/check" -> {
-                if (args.isEmpty()) "Usage: <code>/check EWB-7819-2044</code> — or just send the E-Way Bill / vehicle number."
+                if (args.isEmpty()) "Usage: <code>/check PO-2025-4471</code> — or just send a purchase order, packing-list reference or SKU."
                 else checkReply(args)
             }
             "/recent" -> recentReply(args.toIntOrNull()?.coerceIn(1, 10) ?: 5)
@@ -92,19 +93,19 @@ class MessageHandler(
         }
     }
 
-    /** Free-form questions: direct refs win, then intent words, then cargo keywords. */
+    /** Free-form questions: direct refs win, then intent words, then goods keywords. */
     fun answerQuestion(text: String): String {
-        ContainerCheck.resolve(text, records).firstOrNull()?.let { return checkReply(text, resolved = it) }
+        ReceivingCheck.resolve(text, records).firstOrNull()?.let { return checkReply(text, resolved = it) }
         val lower = text.lowercase()
         return when {
             greetingRegex.containsMatchIn(lower) && lower.length < 32 -> greeting()
-            containsAny(lower, "flag", "review", "hold", "problem", "discrepan", "issue", "shortage", "unlisted") -> flaggedReply()
+            containsAny(lower, "flag", "review", "hold", "problem", "discrepan", "issue", "short", "over", "unlisted", "damag") -> flaggedReply()
             containsAny(lower, "stat", "summary", "shift", "how many", "total", "rate") -> statsReply()
             containsAny(lower, "recent", "latest", "last", "history", "today") -> recentReply(5)
             else -> {
-                ContainerCheck.resolveByKeyword(text, records).firstOrNull()
+                ReceivingCheck.resolveByKeyword(text, records).firstOrNull()
                     ?.let { checkReply(text, resolved = it) }
-                    ?: "I couldn't map that to a consignment. $helpHint"
+                    ?: "I couldn't map that to a delivery. $helpHint"
             }
         }
     }
@@ -117,45 +118,45 @@ class MessageHandler(
             .trim()
         if (receipt.isNotEmpty()) return analyzeReceiptReply(receipt)
         return "I received the file but couldn't read a reference from it. " +
-            "Send the E-Way Bill number (e.g. EWB-7819-2044) or the vehicle number, or resend the receipt as text/CSV."
+            "Send the purchase order (e.g. PO-2025-4471), the packing-list reference or a SKU, or resend the receipt as text/CSV."
     }
 
     private fun respondToPhoto(message: TgMessage): String {
         val caption = message.caption.orEmpty()
         if (caption.isBlank()) {
-            return "📸 I can't read text inside photos in this build — add the E-Way Bill number or vehicle number as the photo caption and I'll run the container check."
+            return "📸 I can't read text inside photos in this build — add the purchase order, packing-list reference or SKU as the photo caption and I'll run the receiving check."
         }
         return analyzeReceiptReply(caption)
     }
 
     private fun analyzeReceiptReply(receiptText: String): String {
-        val match = ContainerCheck.analyzeReceipt(receiptText, records)
-            ?: return "No consignment matched that receipt. Try sending the E-Way Bill number (e.g. EWB-7819-2044) or vehicle number directly."
-        val report = ContainerCheck.containerReport(match.record!!, now())
+        val match = ReceivingCheck.analyzeReceipt(receiptText, records)
+            ?: return "No delivery matched that receipt. Try sending the purchase order (e.g. PO-2025-4471), the packing-list reference or a SKU directly."
+        val report = ReceivingCheck.receiptReport(match.record!!, now())
         val extra = if (match.candidates.size > 1) {
             "\n\nOther possible matches:\n" + match.candidates.drop(1).take(2)
-                .joinToString("\n") { ContainerCheck.listLine(it, now()) }
+                .joinToString("\n") { ReceivingCheck.listLine(it, now()) }
         } else ""
         return "📎 Matched by ${match.matchedBy}.\n\n$report$extra"
     }
 
     // ---- Replies ------------------------------------------------------------
 
-    private fun checkReply(query: String, resolved: InspectionRecord? = null): String {
-        val record = resolved ?: ContainerCheck.resolve(query, records).firstOrNull()
-            ?: return "No consignment found for “${Html.esc(query.take(64))}”. Try an E-Way Bill (EWB-7819-2044), a vehicle number (TN 38 BX 4491), or an inspection id (VT-2024-8841)."
-        return ContainerCheck.containerReport(record, now())
+    private fun checkReply(query: String, resolved: ReceivingRecord? = null): String {
+        val record = resolved ?: ReceivingCheck.resolve(query, records).firstOrNull()
+            ?: return "No receipt found for “${Html.esc(query.take(64))}”. Try a purchase order (PO-2025-4471), a packing list (PL-2025-4471-A), a SKU (ELC-2710) or a GRN id (GRN-2025-8841)."
+        return ReceivingCheck.receiptReport(record, now())
     }
 
     private fun statsReply(): String {
         val total = records.size
-        val passed = records.count { it.verdict == Verdict.PASSED }
-        val flagged = records.count { it.verdict == Verdict.REVIEW }
-        val pending = total - passed - flagged
+        val accepted = records.count { it.outcome == ReceiptOutcome.OK }
+        val flagged = records.count { it.flagged }
+        val pending = total - accepted - flagged
         return buildString {
-            appendLine("📊 <b>${Html.esc(BotData.STATION)}</b> — shift summary (${Html.esc(BotData.INSPECTOR)} ${Html.esc(BotData.BADGE)})")
-            appendLine("• Inspections: <b>$total</b>")
-            appendLine("• Cleared: $passed ✅")
+            appendLine("📊 <b>${Html.esc(BotData.WAREHOUSE)}</b> — receiving summary (${Html.esc(BotData.RECEIVER)})")
+            appendLine("• Receipts: <b>$total</b>")
+            appendLine("• Accepted: $accepted ✅")
             appendLine("• Flagged: $flagged ⚠️")
             appendLine("• Pending: $pending 🕓")
             append("• Flag rate: ${"%.1f".format(flagged * 100.0 / total)}%")
@@ -164,50 +165,53 @@ class MessageHandler(
 
     private fun flaggedReply(): String {
         val flagged = records.filter { it.flagged }
-        if (flagged.isEmpty()) return "No flagged consignments right now ✅"
+        if (flagged.isEmpty()) return "No flagged deliveries right now ✅"
         return buildString {
-            appendLine("⚠️ <b>Flagged consignments</b> (${flagged.size}):")
+            appendLine("⛔ <b>Flagged receipts</b> (${flagged.size}):")
             appendLine()
-            appendLine(flagged.joinToString("\n") { ContainerCheck.listLine(it, now()) })
+            appendLine(flagged.joinToString("\n") { ReceivingCheck.listLine(it, now()) })
             appendLine()
-            append("Send <code>/check &lt;id&gt;</code> for the full container report.")
+            append("Send <code>/check &lt;ref&gt;</code> for the full receipt report.")
         }
     }
 
     private fun recentReply(n: Int): String {
         val latest = records.sortedByDescending { it.timestamp }.take(n)
         return buildString {
-            appendLine("🕘 <b>Latest inspections</b>:")
+            appendLine("🕘 <b>Latest receipts</b>:")
             appendLine()
-            appendLine(latest.joinToString("\n") { ContainerCheck.listLine(it, now()) })
+            appendLine(latest.joinToString("\n") { ReceivingCheck.listLine(it, now()) })
             appendLine()
-            append("Send any EWB / vehicle number for a full check.")
+            append("Send any PO, packing-list reference or SKU for a full check.")
         }
     }
 
     private fun greeting(): String =
-        "👋 ${BotData.INSPECTOR} on duty at ${BotData.STATION}. " +
-            "Send me an E-Way Bill number, vehicle number, or a receipt and I'll run the container check.\n\n$helpHint"
+        "👋 ${BotData.RECEIVER} at ${BotData.WAREHOUSE}. " +
+            "Send me a purchase order, packing-list reference or SKU, or a receipt, and I'll run the receiving check.\n\n$helpHint"
 
     private val helpHint =
-        "Try <code>/check EWB-7819-2044</code>, <code>/recent</code>, <code>/flagged</code> or <code>/stats</code>."
+        "Try <code>/check PO-2025-4471</code>, <code>/recent</code>, <code>/flagged</code> or <code>/stats</code>."
 
     private fun helpText(): String = """
-        |🤖 <b>VeriTransit Container-Check Bot</b>
+        |🤖 <b>VeriTransit Receiving Bot</b>
         |
-        |<b>What I do</b> — ask me about any consignment or drop a receipt, and I check the container against the ${Html.esc(BotData.STATION)} inspection vault: manifest reconciliation, discrepancies, verdict and recommended statutory action.
+        |<b>What I do</b> — ask me about any delivery or drop a receipt, and I check it against the ${Html.esc(BotData.WAREHOUSE)} receiving log: packed vs received per SKU, discrepancies, receipt outcome and what to do with the delivery.
+        |
+        |This is a goods-receiving helper for B2B trade. It is <b>not</b> a GST, customs or legal verification tool and holds no statutory authority.
         |
         |<b>Just send</b>
-        |• an E-Way Bill — <code>EWB-7819-2044</code>
-        |• a vehicle number — <code>TN 38 BX 4491</code>
-        |• an inspection id — <code>VT-2024-8841</code>
-        |• a receipt photo (EWB in the caption) or a text/CSV receipt
+        |• a purchase order — <code>PO-2025-4471</code>
+        |• a packing list — <code>PL-2025-4471-A</code>
+        |• a SKU — <code>ELC-2710</code>
+        |• a GRN id — <code>GRN-2025-8841</code>
+        |• a receipt photo (PO in the caption) or a text/CSV receipt
         |
         |<b>Commands</b>
-        |/check &lt;ref&gt; — full container check
-        |/recent — latest inspections
-        |/flagged — consignments held for review
-        |/stats — shift summary
+        |/check &lt;ref&gt; — full receipt report
+        |/recent — latest receipts
+        |/flagged — deliveries held for review
+        |/stats — receiving summary
     """.trimMargin()
 
     private fun containsAny(text: String, vararg needles: String): Boolean = needles.any { it in text }

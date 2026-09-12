@@ -55,20 +55,19 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.veritransit.inspector.data.DashboardSync
-import com.veritransit.inspector.data.InspectionRecord
 import com.veritransit.inspector.data.ItemStatus
-import com.veritransit.inspector.data.OfficerAction
+import com.veritransit.inspector.data.ReceiptOutcome
+import com.veritransit.inspector.data.ReceivingAction
 import com.veritransit.inspector.data.Repo
-import com.veritransit.inspector.data.Verdict
 import com.veritransit.inspector.ui.components.ToastBar
-import com.veritransit.inspector.ui.screens.CargoScanScreen
+import com.veritransit.inspector.ui.screens.DockCountScreen
 import com.veritransit.inspector.ui.screens.AppSettings
 import com.veritransit.inspector.ui.screens.HomeScreen
 import com.veritransit.inspector.ui.screens.ChatScreen
-import com.veritransit.inspector.ui.screens.ManifestScreen
+import com.veritransit.inspector.ui.screens.PackingListScreen
 import com.veritransit.inspector.ui.screens.NpuScreen
-import com.veritransit.inspector.ui.screens.RecordsScreen
-import com.veritransit.inspector.ui.screens.ResultScreen
+import com.veritransit.inspector.ui.screens.ReceiptsScreen
+import com.veritransit.inspector.ui.screens.ReceiptResultScreen
 import com.veritransit.inspector.ui.screens.ScanScreen
 import com.veritransit.inspector.ui.screens.SettingsScreen
 import com.veritransit.inspector.ui.theme.Hanken
@@ -78,14 +77,14 @@ import kotlin.random.Random
 
 private enum class Tab(val label: String, val icon: ImageVector) {
     HOME("Home", Icons.Rounded.Home),
-    SCAN("Scan", Icons.Rounded.QrCodeScanner),
-    RECORDS("Records", Icons.Rounded.History),
+    SCAN("Receive", Icons.Rounded.QrCodeScanner),
+    RECORDS("Receipts", Icons.Rounded.History),
     SETTINGS("Settings", Icons.Rounded.Settings),
 }
 
 private sealed interface Page {
-    data object ManifestStep : Page
-    data object CargoScan : Page
+    data object PackingListStep : Page
+    data object DockCount : Page
     data object ResultActive : Page
     data class ResultView(val recordId: String) : Page
     data object NpuModel : Page
@@ -103,7 +102,7 @@ fun AppRoot() {
     val now = remember { System.currentTimeMillis() }
     var tab by remember { mutableStateOf(Tab.HOME) }
     val stack = remember { mutableStateListOf<Page>() }
-    val flow = remember { InspectionFlowState() }
+    val flow = remember { ReceivingFlowState() }
     val settings = remember { AppSettings() }
     val scope = rememberCoroutineScope()
     // Survives navigation so the transcript is still there on the way back.
@@ -156,7 +155,7 @@ fun AppRoot() {
                     is NavTarget.TabT -> when (target.tab) {
                         Tab.HOME -> HomeScreen(
                             now = now,
-                            onStartInspection = {
+                            onStartReceiving = {
                                 flow.startNew(false)
                                 startInManualFlag = false
                                 gotoTab(Tab.SCAN)
@@ -167,19 +166,19 @@ fun AppRoot() {
                                 gotoTab(Tab.SCAN)
                             },
                             onOpenRecord = { id -> stack.add(Page.ResultView(id)) },
-                            onOpenShiftLogs = { gotoTab(Tab.RECORDS) },
+                            onOpenReceipts = { gotoTab(Tab.RECORDS) },
                         )
                         Tab.SCAN -> ScanScreen(
                             flow = flow,
                             startInManual = startInManualFlag,
                             onDetected = {
-                                if (flow.manifest == null) flow.manifest = InspectionFlowState.defaultManifest()
+                                if (flow.packingList == null) flow.packingList = ReceivingFlowState.defaultPackingList()
                             },
-                            onContinue = { stack.add(Page.ManifestStep) },
+                            onContinue = { stack.add(Page.PackingListStep) },
                             onBack = { gotoTab(Tab.HOME) },
                             feedback = { msg -> feedback(msg, beep = true) },
                         )
-                        Tab.RECORDS -> RecordsScreen(
+                        Tab.RECORDS -> ReceiptsScreen(
                             now = now,
                             onOpenRecord = { id -> stack.add(Page.ResultView(id)) },
                             onToast = { feedback(it) },
@@ -200,19 +199,19 @@ fun AppRoot() {
                             session = chat,
                             onBack = { stack.removeAt(stack.lastIndex) },
                         )
-                        Page.ManifestStep -> ManifestScreen(
+                        Page.PackingListStep -> PackingListScreen(
                             flow = flow,
-                            onToggleSeal = { flow.sealOk = !flow.sealOk },
-                            onToggleDriver = { flow.driverOk = !flow.driverOk },
-                            onStartScan = {
-                                flow.resetForScan()
-                                stack.add(Page.CargoScan)
+                            onToggleCartonCount = { flow.cartonCountOk = !flow.cartonCountOk },
+                            onToggleLabel = { flow.labelOk = !flow.labelOk },
+                            onStartCount = {
+                                flow.resetForCount()
+                                stack.add(Page.DockCount)
                             },
                             onBack = { stack.removeAt(stack.lastIndex) },
                         )
-                        Page.CargoScan -> CargoScanScreen(
+                        Page.DockCount -> DockCountScreen(
                             flow = flow,
-                            onScanComplete = {
+                            onCountComplete = {
                                 if (flow.confidence() == 0f) flow.setConfidence(flow.aiConfidence)
                                 stack.add(Page.ResultActive)
                             },
@@ -220,38 +219,37 @@ fun AppRoot() {
                         )
                         Page.ResultActive -> {
                             val draft = flow.draftRecord(now)
-                            ResultScreen(
+                            ReceiptResultScreen(
                                 record = draft,
                                 flow = flow,
                                 onConfirm = { action, note ->
                                     val final = draft.copy(
-                                        verdict = if (action == OfficerAction.CLEAR) Verdict.PASSED else Verdict.REVIEW,
+                                        outcome = if (action == ReceivingAction.ACCEPT) ReceiptOutcome.OK else ReceiptOutcome.MISMATCH,
                                         note = note,
                                     )
                                     Repo.commit(final)
-                                    feedback("Record ${final.id} committed to vault", beep = true)
+                                    feedback("Receipt ${final.id} filed in the receipt log", beep = true)
                                     gotoTab(Tab.HOME)
-                                    // Back-office handoff: flips the consignment to
-                                    // shipped/held on the web dashboard and publishes
-                                    // its PDF report. The vault copy above is the
-                                    // statutory one — a failed push changes nothing.
+                                    // Back-office handoff: flips the delivery to
+                                    // accepted/held on the web dashboard and publishes
+                                    // its PDF report. The log copy above is the one
+                                    // of record — a failed push changes nothing.
                                     scope.launch {
-                                        DashboardSync.push(final, flow.billEvidence, flow.cargoEvidence)
+                                        DashboardSync.push(final, flow.listEvidence, flow.dockEvidence)
                                             .onSuccess {
                                                 feedback(
-                                                    if (final.flagged) "Dashboard updated · consignment held"
-                                                    else "Dashboard updated · shipped, OK to pay",
+                                                    if (final.flagged) "Dashboard updated · delivery held"
+                                                    else "Dashboard updated · accepted, OK to pay",
                                                 )
                                             }
-                                            .onFailure { feedback("Dashboard offline — record stays in vault") }
+                                            .onFailure { feedback("Dashboard offline — receipt stays in the log") }
                                     }
                                 },
-                                onRescan = {
-                                    flow.resetForScan()
+                                onRecount = {
+                                    flow.resetForCount()
                                     stack.removeAt(stack.lastIndex)
                                 },
-                                onPrint = { feedback("Summary queued for field printer") },
-                                onIssueNotice = null,
+                                onPrint = { feedback("Summary queued for the dock printer") },
                                 onBack = { stack.removeAt(stack.lastIndex) },
                             )
                         }
@@ -260,17 +258,12 @@ fun AppRoot() {
                             if (record == null) {
                                 Box(Modifier.fillMaxSize())
                             } else {
-                                ResultScreen(
+                                ReceiptResultScreen(
                                     record = record,
                                     flow = null,
                                     onConfirm = { _, _ -> },
-                                    onRescan = null,
-                                    onPrint = { feedback("Summary queued for field printer") },
-                                    onIssueNotice = {
-                                        val idx = Repo.records.indexOfFirst { it.id == record.id }
-                                        if (idx >= 0) Repo.records[idx] = record.copy(noticeIssued = true)
-                                        feedback("Notice MOV-04 issued & logged")
-                                    },
+                                    onRecount = null,
+                                    onPrint = { feedback("Summary queued for the dock printer") },
                                     onBack = { stack.removeAt(stack.lastIndex) },
                                 )
                             }

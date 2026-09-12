@@ -265,9 +265,9 @@ fun NpuScreen(onBack: () -> Unit, onToast: (String) -> Unit, onOpenChat: () -> U
             SectionLabel("How it is used")
             VTCard {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(11.dp)) {
-                    UseRow("Step 1", "Reads the E-Way Bill straight off the paper — number, vehicle, route, declared lines.")
-                    UseRow("Step 3", "Counts visible cargo against the declared manifest and flags anything undeclared.")
-                    UseRow("Verdict", "Drafts the statutory remarks from the reconciliation result.")
+                    UseRow("Step 1", "Reads the supplier packing list off the paper — purchase order, packing list, declared SKU lines.")
+                    UseRow("Step 3", "Counts the goods visible on the dock against the packing list and flags anything undeclared or damaged.")
+                    UseRow("Note", "Drafts the receiver's remarks from the count result.")
                 }
             }
 

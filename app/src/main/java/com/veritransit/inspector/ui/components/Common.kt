@@ -64,7 +64,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.veritransit.inspector.data.Verdict
+import com.veritransit.inspector.data.ReceiptOutcome
 import com.veritransit.inspector.ui.theme.Mono
 import com.veritransit.inspector.ui.theme.VT
 import com.veritransit.inspector.ui.theme.mono
@@ -72,10 +72,11 @@ import com.veritransit.inspector.ui.theme.mono
 /* ---------------------------------- Chips ---------------------------------- */
 
 @Composable
-fun verdictChipColor(verdict: Verdict): Triple<Color, Color, Color> = when (verdict) {
-    Verdict.PASSED -> Triple(VT.EmeraldBg, VT.Emerald, VT.EmeraldLine)
-    Verdict.REVIEW -> Triple(VT.AmberBg, VT.Amber, VT.AmberLine)
-    Verdict.PENDING -> Triple(Color(0xFFF1F5F9), VT.Slate, Color(0xFFE2E8F0))
+fun outcomeChipColor(outcome: ReceiptOutcome): Triple<Color, Color, Color> = when (outcome) {
+    ReceiptOutcome.OK -> Triple(VT.EmeraldBg, VT.Emerald, VT.EmeraldLine)
+    ReceiptOutcome.SHORT, ReceiptOutcome.OVER -> Triple(VT.AmberBg, VT.Amber, VT.AmberLine)
+    ReceiptOutcome.MISMATCH -> Triple(VT.CrimsonBg, VT.Crimson, VT.CrimsonLine)
+    ReceiptOutcome.PENDING -> Triple(Color(0xFFF1F5F9), VT.Slate, Color(0xFFE2E8F0))
 }
 
 /** Mono uppercase status badge with leading dot — the app's signature state marker. */
@@ -112,13 +113,15 @@ fun StatusChip(
 }
 
 @Composable
-fun VerdictChip(verdict: Verdict, modifier: Modifier = Modifier, label: String? = null) {
-    val (bg, fg, line) = verdictChipColor(verdict)
+fun OutcomeChip(outcome: ReceiptOutcome, modifier: Modifier = Modifier, label: String? = null) {
+    val (bg, fg, line) = outcomeChipColor(outcome)
     StatusChip(
-        text = label ?: when (verdict) {
-            Verdict.PASSED -> "Passed"
-            Verdict.REVIEW -> "Review"
-            Verdict.PENDING -> "Pending"
+        text = label ?: when (outcome) {
+            ReceiptOutcome.OK -> "OK"
+            ReceiptOutcome.SHORT -> "Short"
+            ReceiptOutcome.OVER -> "Over"
+            ReceiptOutcome.MISMATCH -> "Mismatch"
+            ReceiptOutcome.PENDING -> "Pending"
         },
         bg = bg, fg = fg, line = line, modifier = modifier,
     )
@@ -361,8 +364,8 @@ fun ToastBar(message: String?, visible: Boolean, modifier: Modifier = Modifier) 
 data class Bounds(val x: Float, val y: Float, val w: Float, val h: Float, val color: Color, val tag: String)
 
 /**
- * Stylized vector "evidence photo" of a cargo bay with AI bounding boxes.
- * Drawn entirely in code — zero image assets shipped.
+ * Stylized vector "evidence photo" of a delivery on the dock with AI bounding
+ * boxes. Drawn entirely in code — zero image assets shipped.
  */
 @Composable
 fun EvidenceCanvas(modifier: Modifier = Modifier, boxes: List<Bounds>, timestamp: String = "GPS Verified") {

@@ -85,14 +85,14 @@ import com.google.mlkit.vision.common.InputImage
 import com.veritransit.inspector.ai.EvidenceCamera
 import com.veritransit.inspector.ai.LlmGateway
 import com.veritransit.inspector.ai.EvidenceViewfinder
-import com.veritransit.inspector.ai.InspectorAi
+import com.veritransit.inspector.ai.ReceivingAi
 import com.veritransit.inspector.ai.NpuEngine
 import com.veritransit.inspector.ai.OpenRouterClient
-import com.veritransit.inspector.data.Manifest
+import com.veritransit.inspector.data.PackingList
 import com.veritransit.inspector.data.Presets
-import com.veritransit.inspector.data.QrBill
-import com.veritransit.inspector.ui.BillSections
-import com.veritransit.inspector.ui.InspectionFlowState
+import com.veritransit.inspector.data.QrLabel
+import com.veritransit.inspector.ui.ListSections
+import com.veritransit.inspector.ui.ReceivingFlowState
 import com.veritransit.inspector.ui.components.FieldLabel
 import com.veritransit.inspector.ui.components.FlowHeader
 import com.veritransit.inspector.ui.components.FlowScaffold
@@ -108,7 +108,7 @@ import kotlinx.coroutines.launch
 
 @Composable
 fun ScanScreen(
-    flow: InspectionFlowState,
+    flow: ReceivingFlowState,
     startInManual: Boolean,
     onDetected: () -> Unit,
     onContinue: () -> Unit,
@@ -125,13 +125,13 @@ fun ScanScreen(
                 enter = slideInVertically(spring(dampingRatio = 0.85f, stiffness = Spring.StiffnessLow)) { it } + fadeIn(),
                 exit = fadeOut(),
             ) {
-                PrimaryButton("Continue to Manifest Details", onContinue, trailingIcon = Icons.AutoMirrored.Rounded.ArrowForward)
+                PrimaryButton("Continue to Packing List", onContinue, trailingIcon = Icons.AutoMirrored.Rounded.ArrowForward)
             }
         },
     ) {
         FlowHeader(
-            title = "Load E-Way Bill",
-            subtitle = "QR code or bill photo",
+            title = "Load Packing List",
+            subtitle = "Carton label or packing-list photo",
             onBack = onBack,
             trailing = { StepBadge(1) },
         )
@@ -169,7 +169,7 @@ private fun Segmented(selected: Int, onSelect: (Int) -> Unit) {
                 .background(VT.Primary),
         )
         Row(Modifier.fillMaxSize()) {
-            SegTab("Scan QR Code", Icons.Rounded.QrCodeScanner, selected == 0, Modifier.weight(1f)) { onSelect(0) }
+            SegTab("Scan Label", Icons.Rounded.QrCodeScanner, selected == 0, Modifier.weight(1f)) { onSelect(0) }
             SegTab("Manual Entry", Icons.Rounded.Keyboard, selected == 1, Modifier.weight(1f)) { onSelect(1) }
         }
     }
@@ -221,7 +221,7 @@ private fun Bracket(corner: CornerQ, modifier: Modifier) {
 }
 
 @Composable
-private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedback: (String) -> Unit) {
+private fun Viewfinder(flow: ReceivingFlowState, onDetected: () -> Unit, feedback: (String) -> Unit) {
     val haptics = LocalHapticFeedback.current
     val hapticsEnabled = com.veritransit.inspector.ui.theme.LocalHapticsEnabled.current
     val context = LocalContext.current
@@ -246,43 +246,41 @@ private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedba
     var reading by remember { mutableStateOf(false) }
     var readError by remember { mutableStateOf<String?>(null) }
 
-    // Real QR decoding on the live frames, so the printed bill code locks the
+    // Real label decoding on the live frames, so the printed code locks the
     // step on its own — the capture button stays for the full-document OCR
-    // read, which the QR alone (often just the bill number) cannot replace.
-    // The analyzer is bound while the QR segment is showing; the guards inside
+    // read, which the label alone (often just the PO) cannot replace.
+    // The analyzer is bound while the scan segment is showing; the guards inside
     // keep a stale frame from re-locking an already-resolved step.
-    // No format filter: the printed code on an E-Way Bill may be a QR or a
+    // No format filter: the printed code on a carton label may be a QR or a
     // 1D barcode, and the default scanner covers every supported format.
     val scanner = remember { BarcodeScanning.getClient() }
     DisposableEffect(scanner) { onDispose { scanner.close() } }
 
-    fun onQrScanned(payload: String) {
+    fun onLabelScanned(payload: String) {
         if (reading || flow.detected) return
-        val fields = QrBill.parse(payload)
+        val fields = QrLabel.parse(payload)
         val p = Presets.DEFAULT
-        val ewb = fields.ewb ?: payload.take(28)
-        flow.manifest = Manifest(
-            ewb = ewb,
-            vehicle = fields.vehicle ?: "—",
-            vehicleModel = p.vehicleModel,
-            consignment = p.name,
-            route = p.route,
-            distanceKm = p.distanceKm,
-            items = p.items.map { it.copy(found = it.expected) },
-            ref = "#" + (fields.ewb?.filter { it.isDigit() }?.takeLast(4) ?: "QR"),
+        flow.packingList = PackingList(
+            purchaseOrderId = fields.purchaseOrderId ?: p.purchaseOrderId,
+            packingListId = fields.packingListId ?: p.packingListId,
+            supplier = p.supplier,
+            goods = p.goods,
+            dock = p.dock,
+            carrier = p.carrier,
+            items = p.items.map { it.copy(received = it.expected) },
         )
-        // The QR carries identifiers, not the goods table — the officer
-        // confirms the declared lines on the manifest step, exactly as after
+        // The label carries references, not the goods table — the receiver
+        // confirms the packed lines on the packing-list step, exactly as after
         // a manual entry.
-        flow.ewbInput = ewb
-        flow.vehicleInput = fields.vehicle ?: ""
-        flow.billSections = null
-        flow.qrResolved = true
+        flow.poInput = fields.purchaseOrderId ?: ""
+        flow.packingListInput = fields.packingListId ?: ""
+        flow.listSections = null
+        flow.labelResolved = true
         if (hapticsEnabled) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
         flow.detected = true
     }
 
-    val qrAnalyzer = remember(cameraGranted) {
+    val labelAnalyzer = remember(cameraGranted) {
         if (!cameraGranted) {
             null
         } else {
@@ -296,7 +294,7 @@ private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedba
                 scanner.process(input)
                     .addOnSuccessListener { codes ->
                         val payload = codes.firstOrNull()?.rawValue
-                        if (!payload.isNullOrBlank()) onQrScanned(payload)
+                        if (!payload.isNullOrBlank()) onLabelScanned(payload)
                     }
                     .addOnCompleteListener { proxy.close() }
             }
@@ -309,38 +307,38 @@ private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedba
         readError = null
         scope.launch {
             try {
-                // A bill is a document: fit the whole page in rather than
-                // centre-cropping the goods table off the bottom.
+                // A packing list is a document: fit the whole page in rather
+                // than centre-cropping the goods table off the bottom.
                 val frame = camera.capture(context, EvidenceCamera.Fit.CONTAIN)
                 if (frame == null) {
                     readError = camera.error ?: "Camera could not take the shot."
                     return@launch
                 }
-                flow.billEvidence = frame.absolutePath
-                InspectorAi.readEwayBill(frame.absolutePath)
-                    .onSuccess { bill ->
+                flow.listEvidence = frame.absolutePath
+                ReceivingAi.readPackingList(frame.absolutePath)
+                    .onSuccess { reading ->
                         when {
                             // The model judged the document unreadable. However
                             // many fields squeaked out, trusting them would
-                            // build a manifest off a misread — reject and have
-                            // the officer retake or enter it manually.
-                            !bill.legible ->
+                            // build a packing list off a misread — reject and
+                            // have the receiver retake or enter it manually.
+                            !reading.legible ->
                                 readError =
-                                    "This bill could not be read clearly enough to trust — " +
-                                        "retake it in better light or enter the manifest manually."
-                            bill.usable -> {
-                                flow.manifest = bill.toManifest()
-                                flow.manifestFromAi = true
-                                flow.billSections = BillSections(
-                                    header = bill.headerConfidence,
-                                    route = bill.routeConfidence,
-                                    items = bill.itemsConfidence,
+                                    "This packing list could not be read clearly enough to trust — " +
+                                        "retake it in better light or enter the references manually."
+                            reading.usable -> {
+                                flow.packingList = reading.toPackingList()
+                                flow.listFromAi = true
+                                flow.listSections = ListSections(
+                                    header = reading.headerConfidence,
+                                    supplier = reading.supplierConfidence,
+                                    items = reading.itemsConfidence,
                                 )
                                 if (hapticsEnabled) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                                 flow.detected = true
                             }
                             else ->
-                                readError = "Nothing legible in frame — fill it with the bill and hold steady."
+                                readError = "Nothing legible in frame — fill it with the packing list and hold steady."
                         }
                     }
                     .onFailure { readError = it.message ?: "The model could not parse that document." }
@@ -361,11 +359,11 @@ private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedba
         if (flow.detected) {
             feedback(
                 when {
-                    flow.qrResolved -> "QR code scanned · bill ${flow.manifest?.ewb}"
-                    !flow.manifestFromAi -> "Manifest resolved · E-Way Bill locked"
+                    flow.labelResolved -> "Carton label scanned · PO ${flow.packingList?.purchaseOrderId}"
+                    !flow.listFromAi -> "Packing list loaded · ready to count"
                     LlmGateway.lastBackend == LlmGateway.Backend.CLOUD ->
-                        "E-Way Bill read · GLM-5.3-Flash (cloud)"
-                    else -> "E-Way Bill read on-device · NPU"
+                        "Packing list read · GLM-5.3-Flash (cloud)"
+                    else -> "Packing list read on-device · NPU"
                 },
             )
             onDetected()
@@ -386,7 +384,7 @@ private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedba
                 },
         ) {
             if (live) {
-                EvidenceViewfinder(camera, Modifier.fillMaxSize(), analyzer = qrAnalyzer)
+                EvidenceViewfinder(camera, Modifier.fillMaxSize(), analyzer = labelAnalyzer)
             } else Canvas(Modifier.fillMaxSize()) {
                 val w = size.width
                 val h = size.height
@@ -476,7 +474,7 @@ private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedba
                         .padding(horizontal = 14.dp, vertical = 8.dp),
                 ) {
                     Text(
-                        "QR LOCKED",
+                        "LABEL LOCKED",
                         style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Bold, fontSize = 12.sp, letterSpacing = 0.1.sp),
                         color = Color.White,
                     )
@@ -487,9 +485,9 @@ private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedba
             Text(
                 when {
                     reading -> "Reading document…"
-                    flow.detected -> "Manifest captured"
-                    live -> "Hold the bill's QR code in frame — or capture to read it"
-                    else -> "Align QR code or barcode within frame"
+                    flow.detected -> "Packing list captured"
+                    live -> "Hold the carton label in frame — or capture to read the list"
+                    else -> "Align the carton label within frame"
                 },
                 style = MaterialTheme.typography.bodyMedium,
                 color = VT.Slate,
@@ -509,10 +507,10 @@ private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedba
             if (!NpuEngine.isReady) {
                 NoticeStrip(
                     if (LlmGateway.mode == LlmGateway.Mode.CLOUD) {
-                        "Cloud engine selected — the bill photo is sent to " +
+                        "Cloud engine selected — the packing-list photo is sent to " +
                             OpenRouterClient.DISPLAY_NAME + " on OpenRouter."
                     } else {
-                        "The on-device model is not loaded — the bill photo will be " +
+                        "The on-device model is not loaded — the packing-list photo will be " +
                             "sent to ${OpenRouterClient.DISPLAY_NAME} on OpenRouter."
                     },
                 )
@@ -520,8 +518,8 @@ private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedba
             PrimaryButton(
                 text = when {
                     reading -> "Reading…"
-                    flow.detected -> "Re-read document"
-                    else -> "Capture & read bill"
+                    flow.detected -> "Re-read packing list"
+                    else -> "Capture & read packing list"
                 },
                 onClick = ::captureAndRead,
                 enabled = camera.ready && !reading,
@@ -546,7 +544,7 @@ private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedba
 }
 
 @Composable
-private fun DetectedCard(flow: InspectionFlowState) {
+private fun DetectedCard(flow: ReceivingFlowState) {
     AnimatedVisibility(
         visible = flow.detected,
         enter = expandVertically(spring(dampingRatio = 0.85f, stiffness = 240f)) + fadeIn(),
@@ -558,7 +556,7 @@ private fun DetectedCard(flow: InspectionFlowState) {
                     Box(Modifier.size(8.dp).clip(CircleShape).background(VT.Emerald))
                     Spacer(Modifier.width(9.dp))
                     Text(
-                        "MANIFEST DETECTED",
+                        "PACKING LIST LOADED",
                         style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.SemiBold, fontSize = 12.sp, letterSpacing = 0.06.sp),
                         color = VT.Slate,
                     )
@@ -570,26 +568,26 @@ private fun DetectedCard(flow: InspectionFlowState) {
                     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Row {
                             Column(Modifier.weight(1f)) {
-                                FieldLabel("E-Way Bill")
+                                FieldLabel("Purchase Order")
                                 Spacer(Modifier.height(4.dp))
-                                Text(flow.manifest?.ewb ?: "—", style = com.veritransit.inspector.ui.theme.mono().data, color = VT.Ink)
+                                Text(flow.packingList?.purchaseOrderId ?: "—", style = com.veritransit.inspector.ui.theme.mono().data, color = VT.Ink)
                             }
                             Column(horizontalAlignment = Alignment.End) {
-                                FieldLabel("Vehicle")
+                                FieldLabel("Packing List")
                                 Spacer(Modifier.height(4.dp))
-                                Text(flow.manifest?.vehicle ?: "—", style = com.veritransit.inspector.ui.theme.mono().data, color = VT.Ink)
+                                Text(flow.packingList?.packingListId ?: "—", style = com.veritransit.inspector.ui.theme.mono().data, color = VT.Ink)
                             }
                         }
                         Row {
                             Column(Modifier.weight(1f)) {
-                                FieldLabel("Consignment")
+                                FieldLabel("Supplier")
                                 Spacer(Modifier.height(4.dp))
-                                Text(flow.manifest?.consignment ?: "—", style = MaterialTheme.typography.titleSmall, color = VT.Ink)
+                                Text(flow.packingList?.supplier ?: "—", style = MaterialTheme.typography.titleSmall, color = VT.Ink)
                             }
                             Column(horizontalAlignment = Alignment.End) {
-                                FieldLabel("Items")
+                                FieldLabel("Units Packed")
                                 Spacer(Modifier.height(4.dp))
-                                Text("${flow.manifest?.totalUnits ?: 0} Pcs", style = com.veritransit.inspector.ui.theme.mono().data, color = VT.Ink)
+                                Text("${flow.packingList?.totalUnits ?: 0} Pcs", style = com.veritransit.inspector.ui.theme.mono().data, color = VT.Ink)
                             }
                         }
                     }
@@ -603,60 +601,59 @@ private fun DetectedCard(flow: InspectionFlowState) {
 
 @Composable
 private fun ManualEntry(
-    flow: InspectionFlowState,
+    flow: ReceivingFlowState,
     feedback: (String) -> Unit,
     onContinue: () -> Unit,
 ) {
-    var ewb by remember { mutableStateOf(flow.ewbInput) }
-    var vehicle by remember { mutableStateOf(flow.vehicleInput) }
+    var po by remember { mutableStateOf(flow.poInput) }
+    var packingRef by remember { mutableStateOf(flow.packingListInput) }
     var presetIdx by remember { mutableStateOf(flow.presetIndex) }
 
-    val ewbValid = ewb.filter { it.isDigit() }.length == 12
-    val vehicleValid = vehicle.filter { it.isLetterOrDigit() }.length >= 6
+    val poValid = po.filter { it.isDigit() }.length >= 6
+    val refValid = packingRef.count { it.isLetterOrDigit() } >= 6
 
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         VTCard {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Column {
-                    FieldLabel("E-Way Bill Number")
+                    FieldLabel("Purchase Order Number")
                     Spacer(Modifier.height(6.dp))
                     MonoField(
-                        value = ewb,
+                        value = po,
                         onValueChange = { raw ->
-                            val d = raw.filter { it.isDigit() }.take(12)
-                            ewb = d.chunked(4).joinToString("-")
-                            flow.ewbInput = ewb
+                            po = raw.uppercase().filter { it.isLetterOrDigit() || it == '-' }.take(14)
+                            flow.poInput = po
                         },
-                        hint = "7819-2044-8831",
+                        hint = "PO-2025-4471",
                     )
                     Text(
                         when {
-                            ewb.isEmpty() -> "12 digits, printed beside the QR"
-                            ewbValid -> "✓ Valid format"
-                            else -> "${ewb.filter { it.isDigit() }.length}/12 digits"
+                            po.isEmpty() -> "Printed on the PO and the carton label"
+                            poValid -> "✓ Valid format"
+                            else -> "Enter the PO reference"
                         },
                         style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Normal, fontSize = 10.5.sp),
-                        color = if (ewbValid) VT.Emerald else VT.Faint,
+                        color = if (poValid) VT.Emerald else VT.Faint,
                         modifier = Modifier.padding(top = 6.dp),
                     )
                 }
                 Column {
-                    FieldLabel("Vehicle Number")
+                    FieldLabel("Packing List Reference")
                     Spacer(Modifier.height(6.dp))
                     MonoField(
-                        value = vehicle,
+                        value = packingRef,
                         onValueChange = { raw ->
-                            vehicle = raw.uppercase().filter { it.isLetterOrDigit() || it == ' ' }.take(12)
-                            flow.vehicleInput = vehicle
+                            packingRef = raw.uppercase().filter { it.isLetterOrDigit() || it == '-' }.take(16)
+                            flow.packingListInput = packingRef
                         },
-                        hint = "TN 38 BX 4491",
+                        hint = "PL-2025-4471-A",
                     )
                 }
             }
         }
         VTCard {
             Column(Modifier.padding(16.dp)) {
-                FieldLabel("Consignment Type")
+                FieldLabel("Goods Category")
                 Spacer(Modifier.height(8.dp))
                 Presets.ALL.forEachIndexed { i, p ->
                     val active = presetIdx == i
@@ -683,39 +680,38 @@ private fun ManualEntry(
                         }
                         Spacer(Modifier.width(10.dp))
                         Column {
-                            Text(p.name, style = MaterialTheme.typography.titleSmall, color = VT.Ink)
-                            Text("${p.route} · ${p.distanceKm} km · ${p.totalUnits} pcs", style = com.veritransit.inspector.ui.theme.mono().dataSmall, color = VT.Muted)
+                            Text(p.supplier, style = MaterialTheme.typography.titleSmall, color = VT.Ink)
+                            Text("${p.short} · ${p.totalUnits} pcs packed", style = com.veritransit.inspector.ui.theme.mono().dataSmall, color = VT.Muted)
                         }
                     }
                     if (i < Presets.ALL.lastIndex) Spacer(Modifier.height(6.dp))
                 }
             }
         }
-        val ok = ewbValid && vehicleValid
+        val ok = poValid && refValid
         PrimaryButton(
-            text = "Open Manifest Details",
+            text = "Open Packing List",
             enabled = ok,
             trailingIcon = Icons.AutoMirrored.Rounded.ArrowForward,
             onClick = {
                 if (ok) {
                     val p = Presets.ALL[presetIdx]
-                    flow.manifest = Manifest(
-                        ewb = ewb,
-                        vehicle = vehicle,
-                        vehicleModel = p.vehicleModel,
-                        consignment = p.name,
-                        route = p.route,
-                        distanceKm = p.distanceKm,
+                    flow.packingList = PackingList(
+                        purchaseOrderId = po,
+                        packingListId = packingRef,
+                        supplier = p.supplier,
+                        goods = p.goods,
+                        dock = p.dock,
+                        carrier = p.carrier,
                         items = p.items,
-                        ref = "#" + ewb.filter { it.isDigit() }.take(4) + "-A",
                     )
                     // Manual entry: any confidence markers from an earlier
                     // on-device read in this flow no longer apply.
-                    flow.billSections = null
+                    flow.listSections = null
                     flow.detected = true
-                    feedback("Manifest drafted from manual entry")
-                    // Straight through to the manifest step — the pinned
-                    // "Continue" bar below only exists on the QR path, so
+                    feedback("Packing list drafted from manual entry")
+                    // Straight through to the packing-list step — the pinned
+                    // "Continue" bar below only exists on the scan path, so
                     // without this call manual entry dead-ends on this screen.
                     onContinue()
                 }

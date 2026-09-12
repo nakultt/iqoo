@@ -17,7 +17,7 @@ import kotlin.test.assertTrue
  * JVM-side checks for the OpenRouter fallback's protocol shape — the request
  * the cloud leg sends, the turn mapping, and the SSE folding that turns the
  * stream into a reply. These run without a device or a network, so a protocol
- * regression fails CI instead of an officer's inspection.
+ * regression fails CI instead of a receiver's count.
  */
 class OpenRouterClientTest {
 
@@ -200,7 +200,7 @@ class OpenRouterClientTest {
     // --------------------------------------- HTTP paths via a local server
 
     @Test
-    fun `http 402 becomes an officer-readable credit failure`() {
+    fun `http 402 becomes a readable credit failure`() {
         val server = MockWebServer()
         server.start()
         server.enqueue(

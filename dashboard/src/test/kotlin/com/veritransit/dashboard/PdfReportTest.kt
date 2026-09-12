@@ -21,69 +21,69 @@ class PdfReportTest {
     )
 
     private fun record(
-        id: String = "VT-2025-1234",
-        verdict: Verdict = Verdict.PASSED,
+        id: String = "GRN-2025-1234",
+        outcome: ReceiptOutcome = ReceiptOutcome.OK,
         confidence: Float = 0.95f,
         note: String = "",
-        bill: ByteArray? = null,
-        cargo: ByteArray? = null,
-    ) = InspectionRecord(
+        list: ByteArray? = null,
+        dock: ByteArray? = null,
+    ) = ReceivingRecord(
         id = id,
-        ewb = "EWB-9048-2810",
-        vehicle = "TN 38 BX 4491",
-        vehicleModel = "Eicher Pro 2049",
-        cargo = "Industrial Hardware (Fasteners/Plates)",
-        route = "Chennai → Bengaluru",
-        distanceKm = 346,
-        verdict = verdict,
+        purchaseOrderId = "PO-2025-4488",
+        packingListId = "PL-2025-4488-A",
+        supplier = "Deccan Fasteners & Steel",
+        goods = "Industrial Hardware (Fasteners/Plates)",
+        dock = "Dock 1 · Plant Store",
+        carrier = "TCI Freight",
+        outcome = outcome,
         timestamp = 1_760_000_000_000,
         items = listOf(
-            CargoItem("MS Hex Bolts M12", "Sealed Crate A", 12, 12),
-            CargoItem("GI Plates 6mm", "Sealed Crate B", 8, 6),
+            PackingItem("HDW-4412", "MS Hex Bolts M12", "Sealed Crate A", 12, 12),
+            PackingItem("HDW-6608", "GI Plates 6mm", "Sealed Crate B", 8, 6),
         ),
         confidence = confidence,
         note = note,
-        billEvidence = bill,
-        cargoEvidence = cargo,
+        listEvidence = list,
+        dockEvidence = dock,
     )
 
     @Test
     fun `same record renders byte-identical documents`() {
-        val a = PdfReport.render(record(bill = tinyJpeg, cargo = tinyJpeg))
-        val b = PdfReport.render(record(bill = tinyJpeg, cargo = tinyJpeg))
+        val a = PdfReport.render(record(list = tinyJpeg, dock = tinyJpeg))
+        val b = PdfReport.render(record(list = tinyJpeg, dock = tinyJpeg))
         assertTrue(a.contentEquals(b), "two renders of one record differ — non-deterministic output")
     }
 
     @Test
     fun `evidence bytes are part of the document identity`() {
-        val a = PdfReport.render(record(cargo = tinyJpeg))
-        val b = PdfReport.render(record(cargo = tinyJpeg.copyOf().also { it[10] = 0x07 }))
+        val a = PdfReport.render(record(dock = tinyJpeg))
+        val b = PdfReport.render(record(dock = tinyJpeg.copyOf().also { it[10] = 0x07 }))
         assertTrue(!a.contentEquals(b), "different evidence produced identical bytes")
     }
 
     @Test
     fun `a changed record renders a different document`() {
         val a = PdfReport.render(record())
-        val b = PdfReport.render(record(id = "VT-2025-5678"))
+        val b = PdfReport.render(record(id = "GRN-2025-5678"))
         assertTrue(!a.contentEquals(b), "different records produced identical bytes")
     }
 
     @Test
-    fun `cleared consignment carries the ok-to-pay status line`() {
-        val text = PdfReport.render(record(verdict = Verdict.PASSED)).toString(Charsets.ISO_8859_1)
-        assertTrue(text.contains("STATUS: SHIPPED - CLEARED FOR PAYMENT"))
-        assertTrue(text.contains("VT-2025-1234"))
+    fun `an accepted receipt carries the ok-to-pay status line`() {
+        val text = PdfReport.render(record(outcome = ReceiptOutcome.OK)).toString(Charsets.ISO_8859_1)
+        assertTrue(text.contains("STATUS: ACCEPTED - CLEARED FOR PAYMENT"))
+        assertTrue(text.contains("GRN-2025-1234"))
     }
 
     @Test
-    fun `held consignment warns against payment`() {
-        val text = PdfReport.render(record(verdict = Verdict.REVIEW)).toString(Charsets.ISO_8859_1)
-        assertTrue(text.contains("STATUS: HELD AT GATE - DO NOT PAY"))
+    fun `a discrepancy in the receipt warns against payment`() {
+        val text = PdfReport.render(record(outcome = ReceiptOutcome.SHORT)).toString(Charsets.ISO_8859_1)
+        assertTrue(text.contains("STATUS: HELD ON DOCK - DO NOT PAY"))
     }
 
     @Test
     fun `evidence frames are embedded as dct images with parsed dimensions`() {
-        val text = PdfReport.render(record(cargo = tinyJpeg)).toString(Charsets.ISO_8859_1)
+        val text = PdfReport.render(record(dock = tinyJpeg)).toString(Charsets.ISO_8859_1)
         assertTrue(text.contains("/Subtype /Image"))
         assertTrue(text.contains("/Filter /DCTDecode"))
         assertTrue(text.contains("/Width 2"))
@@ -99,10 +99,10 @@ class PdfReportTest {
     }
 
     @Test
-    fun `chart section renders with declared-vs-found bars`() {
+    fun `chart section renders with packed-vs-received bars`() {
         val text = PdfReport.render(record()).toString(Charsets.ISO_8859_1)
-        assertTrue(text.contains("DECLARED VS FOUND"))
-        assertTrue(text.contains("Declared"))
+        assertTrue(text.contains("PACKED VS RECEIVED"))
+        assertTrue(text.contains("Packed"))
         // Painted bars: at least one filled rect per item per series.
         assertTrue(text.contains(" re f"))
     }
@@ -131,9 +131,9 @@ class PdfReportTest {
     }
 
     @Test
-    fun `unicode route is transliterated for the standard fonts`() {
-        assertEquals("Chennai -> Bengaluru", PdfReport.ascii("Chennai → Bengaluru"))
-        assertEquals("Factory Boxed * Pallet", PdfReport.ascii("Factory Boxed • Pallet"))
+    fun `unicode separators are transliterated for the standard fonts`() {
+        assertEquals("Dock 1 - Plant Store", PdfReport.ascii("Dock 1 · Plant Store"))
+        assertEquals("Sealed Crate A * Lot", PdfReport.ascii("Sealed Crate A • Lot"))
     }
 
     @Test

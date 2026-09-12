@@ -135,7 +135,7 @@ class ChatSession {
                 )
             }.onFailure {
                 error = it.message ?: "Generation failed"
-                // The officer's message stays in the transcript: deleting it
+                // The receiver's message stays in the transcript: deleting it
                 // turned a failed send into a lost message with no retry.
             }
         } finally {
@@ -201,7 +201,7 @@ class ChatSession {
         const val TAG = "ChatSession"
 
         const val SYSTEM_PROMPT =
-            "You are a helpful assistant for a transit compliance officer, running " +
+            "You are a helpful assistant for a warehouse receiving clerk, running " +
                 "on this phone's Snapdragon NPU — or, when the on-device model is " +
                 "unavailable, on a cloud model reached through OpenRouter. Answer " +
                 "briefly and directly. When shown an image, describe only what is " +

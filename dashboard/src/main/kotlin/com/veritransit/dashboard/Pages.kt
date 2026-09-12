@@ -8,8 +8,8 @@ import java.time.Instant
 /**
  * Server-rendered HTML for the back-office dashboard — the same "Field
  * Operational Precision" language as the app: alabaster canvas, transit
- * burgundy, mono type for machine-verified values. Cleared consignments show
- * SHIPPED and an OK TO PAY badge; flagged ones hold the gate and the payment.
+ * burgundy, mono type for machine-verified values. Accepted receipts show
+ * ACCEPTED and an OK TO PAY badge; flagged ones hold the delivery and the payment.
  */
 object Pages {
 
@@ -28,7 +28,7 @@ object Pages {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>VeriTransit — Consignment Dashboard</title>
+<title>VeriTransit — Receiving Dashboard</title>
 <style>
   :root {
     --alabaster:#F4F3F0; --surface:#FFFFFF; --inset:#EFEDE9; --hairline:#E2E8F0;
@@ -63,8 +63,8 @@ object Pages {
   tr.card td:first-child { border-left:1px solid var(--hairline); border-radius:10px 0 0 10px; }
   tr.card td:last-child { border-right:1px solid var(--hairline); border-radius:0 10px 10px 0; }
   .id { font-family:var(--mono); font-weight:600; font-size:13.5px; }
-  .ewb { font-family:var(--mono); color:var(--slate); font-size:12.5px; }
-  .route { color:var(--muted); font-size:12.5px; }
+  .ref { font-family:var(--mono); color:var(--slate); font-size:12.5px; }
+  .meta { color:var(--muted); font-size:12.5px; }
   .badge { display:inline-block; font-family:var(--mono); font-weight:700; font-size:10.5px;
            letter-spacing:.07em; padding:5px 10px; border-radius:5px; border:1px solid; white-space:nowrap; }
   .badge.shipped { color:var(--emerald); background:var(--emerald-bg); border-color:var(--emerald-line); }
@@ -85,16 +85,16 @@ object Pages {
     <div class="brand">
       <div class="mark">&#10003;</div>
       <div>
-        <h1>VeriTransit <span style="color:var(--muted);font-weight:400">· Consignment Dashboard</span></h1>
-        <p>Field inspections, release state &amp; payment clearance — ${vault.all.size} consignments on file</p>
+        <h1>VeriTransit <span style="color:var(--muted);font-weight:400">· Receiving Dashboard</span></h1>
+        <p>Dock receipts, acceptance state &amp; payment clearance — ${vault.all.size} receipts on file</p>
       </div>
     </div>
   </header>
 
   <div class="stats">
-    <div class="stat ok"><div class="n">${vault.shipped}</div><div class="l">Shipped · cleared to pay</div></div>
+    <div class="stat ok"><div class="n">${vault.shipped}</div><div class="l">Accepted · cleared to pay</div></div>
     <div class="stat hold"><div class="n">${vault.held}</div><div class="l">Held — do not pay</div></div>
-    <div class="stat wait"><div class="n">${vault.awaiting}</div><div class="l">Awaiting inspection</div></div>
+    <div class="stat wait"><div class="n">${vault.awaiting}</div><div class="l">Awaiting count</div></div>
   </div>
 
   <table>
@@ -102,7 +102,7 @@ $rows
   </table>
 
   <footer>Reports are deterministic PDFs — identical records hash identically.
-  Field app pushes land on POST /api/records.</footer>
+  Dock app pushes land on POST /api/records.</footer>
 </div>
 </body>
 </html>
@@ -120,8 +120,8 @@ $rows
         }
     }
 
-    private fun row(r: InspectionRecord, now: Instant): String {
-        val state = ShipState.of(r.verdict)
+    private fun row(r: ReceivingRecord, now: Instant): String {
+        val state = ShipState.of(r.outcome)
         val (stateClass, paymentBadge) = when (state) {
             ShipState.SHIPPED -> "shipped" to "<span class=\"badge pay-ok\">OK TO PAY</span>"
             ShipState.HELD -> "held" to "<span class=\"badge pay-no\">DO NOT PAY</span>"
@@ -131,12 +131,12 @@ $rows
     <tr class="card">
       <td style="min-width:150px">
         <div class="id">${esc(r.id)}</div>
-        <div class="route">${esc(relative(now, r.timestamp))}</div>
+        <div class="meta">${esc(relative(now, r.timestamp))}</div>
       </td>
       <td>
-        <div class="ewb">${esc(r.ewb)} · ${esc(r.vehicle)}</div>
-        <div>${esc(r.cargo)}</div>
-        <div class="route">${esc(r.route)}${if (r.distanceKm > 0) " · ${r.distanceKm} km" else ""} · ${r.totalUnits} units</div>
+        <div class="ref">${esc(r.purchaseOrderId)} · ${esc(r.packingListId)}</div>
+        <div>${esc(r.supplier)} — ${esc(r.goods)}</div>
+        <div class="meta">${esc(r.dock)}${if (r.carrier.isNotBlank()) " · ${esc(r.carrier)}" else ""} · ${r.totalUnits} units packed</div>
       </td>
       <td style="text-align:right;white-space:nowrap">
         <span class="badge $stateClass">${esc(state.label.uppercase())}</span><br><br>

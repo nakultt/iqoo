@@ -27,7 +27,7 @@ import java.util.Base64
  *
  * This is the leg [LlmGateway] hands a task to when the on-device NPU model is
  * not resident, or its generation failed. It is deliberately a single fixed
- * model — no per-task routing, no second provider — so what the officer sees
+ * model — no per-task routing, no second provider — so what the receiver sees
  * stays predictable and cost is auditable in one OpenRouter dashboard.
  *
  * GLM-5.3-Flash is a reasoning model and OpenRouter refuses to switch thinking
@@ -37,7 +37,7 @@ import java.util.Base64
  * thinking cannot starve the actual reply into a truncated empty string.
  *
  * Replies stream over SSE, mirroring [NpuEngine]'s token callback, so callers
- * need no special-casing: an officer watches the note appear either way.
+ * need no special-casing: a receiver watches the note appear either way.
  */
 object OpenRouterClient {
 
@@ -262,7 +262,7 @@ object OpenRouterClient {
     )
 
     /**
-     * Officer-readable failure for the non-200 paths; the raw server detail
+     * Receiver-readable failure for the non-200 paths; the raw server detail
      * only survives where it is actionable (and lands in logs via the caller).
      */
     private fun describeHttpError(code: Int, body: String): String {
@@ -286,7 +286,7 @@ object OpenRouterClient {
      * on purpose so the whole protocol shape is unit-testable: keep-alive
      * comment lines (`: OPENROUTER PROCESSING`), the `[DONE]` sentinel,
      * `delta.reasoning` (dropped — the request already asks for exclusion, but
-     * a provider that ignores it must not leak thinking into an officer's
+     * a provider that ignores it must not leak thinking into a receiver's
      * record), the final usage chunk, and an `error` object carried mid-stream.
      */
     internal class ReplyAccumulator(onDelta: (String) -> Unit = {}) {

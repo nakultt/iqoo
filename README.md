@@ -1,26 +1,35 @@
-# VeriTransit — Cargo Inspector
+# VeriTransit — Goods Receiving
 
-Field inspection companion for transit & logistics compliance officers. Scan an E-Way
-Bill, verify the manifest, reconcile cargo against declarations, and record a signed
-statutory verdict — on-device first, with a cloud fallback when the NPU model is
-unavailable.
+Goods-receiving companion for B2B warehouse teams. Load a supplier's packing list,
+count what actually arrived at the dock, and file a goods-received note — on-device
+first, with a cloud fallback when the NPU model is unavailable.
 
-Built with **Kotlin + Jetpack Compose (Material 3)**, following the *Field Operational
-Precision* design language: warm alabaster canvas, deep transit burgundy, restrained
-diagnostic accents, Hanken Grotesk for narrative type and JetBrains Mono for
-machine-verified values.
+A supplier packs against a purchase order and a packing list; a warehouse receives
+the delivery and books what actually arrived (matched / short / over / unlisted /
+damaged). The output is a goods-received note and a stock movement.
+
+> [!IMPORTANT]
+> **This is not a GST, customs or legal verification tool.** It has no GSTN or any
+> other tax-authority integration, issues no statutory document and states no legal
+> position. It does not verify E-Way Bills and is not a compliance or enforcement
+> instrument. Records are demo data held in memory.
+
+Built with **Kotlin + Jetpack Compose (Material 3)**, following the *Warehouse
+Operational Precision* design language: warm alabaster canvas, deep transit
+burgundy, restrained diagnostic accents, Hanken Grotesk for narrative type and
+JetBrains Mono for machine-verified values.
 
 ## Screens
 
 | Screen | Purpose |
 | --- | --- |
-| Home (Field Portal) | Shift stats, recent inspections, quick actions |
-| Load E-Way Bill (Step 1) | Simulated QR viewfinder + manual entry with validation |
-| Manifest Details (Step 2) | Consignment summary, declared items, pre-scan checks |
-| Cargo Scan (Step 3) | Item-by-item reconciliation with live progress |
-| Verification Result | Discrepancy report, evidence frame, officer verdict & signed stamp |
-| Records | Searchable/filterable audit vault with flagged-consignment audit card |
-| Settings | Inspector profile, sound & haptic feedback, app info |
+| Home (Receiving) | Shift stats, recent receipts, quick actions |
+| Load Packing List (Step 1) | Carton-label scan + manual PO / packing-list entry with validation |
+| Packing List (Step 2) | Supplier summary, packed SKU lines, pre-count checks |
+| Receive / Count (Step 3) | SKU-by-SKU packed-vs-received count with live progress |
+| Receipt Result | Discrepancy report, evidence photo, receiving action & filed stamp |
+| Receipts | Searchable/filterable goods-received log with flagged-delivery card |
+| Settings | Warehouse & receiver identity, sound & haptic feedback, app info |
 
 ## On-device AI (Snapdragon NPU)
 
@@ -40,13 +49,14 @@ Weights are **not** in the APK. On first use, `NpuEngine` asks the SDK's model
 manager which chipset this handset is, finds the model in the AI Hub catalog,
 and pulls the matching bundle. Everything after that runs with the radio off.
 
-Three tasks use it (`InspectorAi`):
+Four tasks use it (`ReceivingAi`):
 
 | Step | Task |
 | --- | --- |
-| Load E-Way Bill | Reads the printed bill from a photo into a structured manifest |
-| Cargo Scan | Counts visible cargo against the declared manifest |
-| Verification Result | Drafts the officer's statutory remarks (text-only) |
+| Load Packing List | Reads the supplier packing list or carton label from a photo into structured PO / packing-list / SKU lines |
+| Receive / Count | Counts the goods visible on the dock against the packing list, per SKU |
+| Receipt Result | Drafts the receiver's factual note (text-only) |
+| Chat | General assistant for the receiving walkthrough |
 
 Every screen degrades to the scripted demo path when the model is absent, so
 the app is fully usable without the download. Manage it under
@@ -104,12 +114,13 @@ memory, the third context comes back `QNN_COMMON_ERROR_RESOURCE_UNAVAILABLE`
 fails, restarting the app (which drops the previous process's DSP session)
 clears it.
 
-## Telegram container-check bot
+## Telegram receiving bot
 
 [telegram-bot/](telegram-bot/) is a companion JVM service that shares the
-inspector's vault: message the bot an E-Way Bill, vehicle number, or a receipt
-(photo caption / text file) and it replies with the container check — manifest
-reconciliation, discrepancies, verdict and recommended statutory action.
+receiving log: message the bot a purchase order, packing-list reference, SKU or
+a receipt (photo caption / text file) and it replies with the receipt report —
+packed vs received per SKU, discrepancies, receipt outcome and the recommended
+warehouse action.
 
 ```bash
 VERITRANSIT_BOT_TOKEN=<token> ./gradlew :telegram-bot:run
@@ -119,16 +130,27 @@ See [telegram-bot/README.md](telegram-bot/README.md) for the full command set
 and token handling (token is read from the environment or a gitignored file —
 never committed).
 
+## Back-office dashboard
+
+[dashboard/](dashboard/) is a JDK-only web service for the office side: the
+receipts board, per-receipt deterministic PDF reports, and `POST /api/records`
+for the app's handoff. An accepted delivery shows **OK TO PAY**; a flagged one
+holds the delivery and the payment.
+
+```bash
+./gradlew :dashboard:run     # http://localhost:8080
+```
+
 ## Highlights
 
 - **Offline after setup** — in-memory records; the network is used once, to pull
   the model bundle.
 - **Motion-first UX** — staggered list entrances, animated counters, scanning line,
-  spring checkbox/radio states, verdict stamp overlay, animated tab & screen transitions.
+  spring checkbox/radio states, filed stamp overlay, animated tab & screen transitions.
 - **Lightweight** — R8-minified release APK ≈ 1.4 MB; every visual (evidence canvases,
   viewfinder scene, launcher glyph) is drawn in code or vectors — no binary image assets.
-- Repeated inspections cycle through scenarios (clean pass, shortage, unlisted cargo),
-  so the walkthrough stays representative.
+- Repeated counts cycle through receiving scenarios (clean, short, over, unlisted,
+  damaged), so the walkthrough stays representative.
 
 ## Build
 
@@ -149,14 +171,15 @@ Requirements: JDK 17+, Android SDK 36 (`sdk.dir` via `local.properties` or
 ```
 app/src/main/java/com/veritransit/inspector/
 ├── MainActivity.kt
-├── ai/              # GenieX engine, inspection prompts, camera + image prep
-├── data/            # models, seed repository, consignment presets
+├── ai/              # GenieX engine, receiving prompts, camera + image prep
+├── data/            # models, seed repository, packing-list presets
 └── ui/
     ├── theme/       # color tokens, typography (variable fonts), theme
     ├── components/  # chips, buttons, cards, evidence canvas, flow scaffolding
-    └── screens/     # Home, Scan, Manifest, CargoScan, Result, Records, Settings
-telegram-bot/           # Telegram container-check companion service (JVM)
-└── src/…/bot/          # long-poll client, container-check engine, routing
+    └── screens/     # Home, Scan, PackingList, DockCount, ReceiptResult, Receipts, Settings
+telegram-bot/           # Telegram receiving companion service (JVM)
+└── src/…/bot/          # long-poll client, receiving-check engine, routing
+dashboard/              # back-office receipts board + deterministic PDF reports (JVM)
 ```
 
 *Demo data only — not affiliated with any real transport authority.*

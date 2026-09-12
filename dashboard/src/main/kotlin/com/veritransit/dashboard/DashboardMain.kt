@@ -8,17 +8,17 @@ import java.time.Instant
 import java.util.concurrent.Executors
 
 /**
- * VeriTransit web dashboard — the back-office view of the field vault.
+ * VeriTransit web dashboard — the back-office view of the dock receipt log.
  *
  * Serves, with no framework beyond the JDK's built-in HTTP server:
- *   GET  /                    the consignment board (shipped / held / awaiting)
- *   GET  /report/<id>.pdf     the consignment's deterministic PDF report
- *   GET  /api/records         the vault as JSON
- *   POST /api/records         ingest one committed field inspection (upsert by
- *                             id) — this is how the officer app's "Confirm
- *                             Verdict & Sign" updates the board, flipping the
- *                             consignment to shipped with an OK TO PAY badge
- *                             and publishing its report.
+ *   GET  /                    the receipts board (accepted / held / awaiting)
+ *   GET  /report/<id>.pdf     the receipt's deterministic PDF report
+ *   GET  /api/records         the receipt log as JSON
+ *   POST /api/records         ingest one committed dock receipt (upsert by id)
+ *                             — this is how the app's "File Goods-Received
+ *                             Note" updates the board, flipping the delivery to
+ *                             accepted with an OK TO PAY badge and publishing
+ *                             its report.
  */
 object DashboardMain {
 
@@ -40,7 +40,7 @@ object DashboardMain {
         val server = start(port)
         println("VeriTransit dashboard ready on http://0.0.0.0:$port")
         println("  board      http://localhost:$port/")
-        println("  sample PDF http://localhost:$port/report/VT-2024-8838.pdf")
+        println("  sample PDF http://localhost:$port/report/GRN-2025-8838.pdf")
         println("  ingest     POST http://localhost:$port/api/records")
         Thread.currentThread().join()
         server.stop(0)
@@ -56,7 +56,7 @@ object DashboardMain {
                 val id = path.removePrefix("/report/").removeSuffix(".pdf")
                 val record = vault.find(id)
                 if (record == null) {
-                    respond(exchange, 404, "No consignment '$id' in the vault\n".toByteArray(), "text/plain")
+                    respond(exchange, 404, "No receipt '$id' in the log\n".toByteArray(), "text/plain")
                 } else {
                     respond(exchange, 200, PdfReport.render(record), "application/pdf")
                 }
@@ -72,7 +72,7 @@ object DashboardMain {
                 exchange,
                 200,
                 json.encodeToString(
-                    kotlinx.serialization.builtins.ListSerializer(InspectionRecord.serializer()),
+                    kotlinx.serialization.builtins.ListSerializer(ReceivingRecord.serializer()),
                     vault.all,
                 ).toByteArray(),
                 "application/json",
@@ -80,13 +80,13 @@ object DashboardMain {
 
             "POST" -> {
                 val body = exchange.requestBody.readBytes().toString(Charsets.UTF_8)
-                val record = runCatching { json.decodeFromString(InspectionRecord.serializer(), body) }.getOrNull()
+                val record = runCatching { json.decodeFromString(ReceivingRecord.serializer(), body) }.getOrNull()
                 if (record == null) {
                     respond(exchange, 400, """{"ok":false,"error":"unparseable record"}""".toByteArray(), "application/json")
                     return
                 }
                 vault.upsert(record)
-                val state = ShipState.of(record.verdict)
+                val state = ShipState.of(record.outcome)
                 println("ingest: ${record.id} -> ${state.label} (${state.paymentLabel})")
                 respond(
                     exchange,

@@ -36,13 +36,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Edit
-import androidx.compose.material.icons.rounded.Gavel
 import androidx.compose.material.icons.rounded.HistoryEdu
 import androidx.compose.material.icons.rounded.Print
 import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material.icons.rounded.Remove
-
 import androidx.compose.material.icons.rounded.Warning
+
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -64,39 +62,38 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
-import com.veritransit.inspector.data.InspectionRecord
 import com.veritransit.inspector.data.ItemStatus
+import com.veritransit.inspector.data.ReceiptOutcome
+import com.veritransit.inspector.data.ReceivingAction
+import com.veritransit.inspector.data.ReceivingRecord
 import androidx.compose.material.icons.rounded.AutoAwesome
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import com.veritransit.inspector.ai.InspectorAi
+import com.veritransit.inspector.ai.ReceivingAi
 import com.veritransit.inspector.ai.LlmGateway
-import com.veritransit.inspector.data.OfficerAction
-import com.veritransit.inspector.data.Verdict
-import com.veritransit.inspector.ui.InspectionFlowState
+import com.veritransit.inspector.ui.ReceivingFlowState
 import com.veritransit.inspector.ui.components.Bounds
 import com.veritransit.inspector.ui.components.EvidenceCanvas
 import com.veritransit.inspector.ui.components.SectionLabel
 import com.veritransit.inspector.ui.components.StatusChip
 import com.veritransit.inspector.ui.components.SecondaryButton
 import com.veritransit.inspector.ui.components.VTCard
-import com.veritransit.inspector.ui.components.VerdictChip
+import com.veritransit.inspector.ui.components.OutcomeChip
 import com.veritransit.inspector.ui.theme.Mono
 import com.veritransit.inspector.ui.theme.VT
 import com.veritransit.inspector.ui.theme.mono
 
 @Composable
-fun ResultScreen(
-    record: InspectionRecord,
-    flow: InspectionFlowState?,
-    onConfirm: (OfficerAction, String) -> Unit,
-    onRescan: (() -> Unit)?,
+fun ReceiptResultScreen(
+    record: ReceivingRecord,
+    flow: ReceivingFlowState?,
+    onConfirm: (ReceivingAction, String) -> Unit,
+    onRecount: (() -> Unit)?,
     onPrint: () -> Unit,
-    onIssueNotice: (() -> Unit)?,
     onBack: () -> Unit,
 ) {
     var action by remember(record.id) {
-        mutableStateOf(flow?.action ?: if (record.flagged) OfficerAction.RECOUNT else OfficerAction.CLEAR)
+        mutableStateOf(flow?.action ?: if (record.flagged) ReceivingAction.RECOUNT else ReceivingAction.ACCEPT)
     }
     var showStamp by remember { mutableStateOf(false) }
     var showZoom by remember { mutableStateOf(false) }
@@ -114,10 +111,10 @@ fun ResultScreen(
             Header(record, onBack)
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Banner(record)
-                ReconciliationCard(record)
-                EvidenceSection(record, evidencePath = flow?.cargoEvidence, onZoom = { showZoom = true })
+                CountCard(record)
+                EvidenceSection(record, evidencePath = flow?.dockEvidence, onZoom = { showZoom = true })
 
-                if (record.verdict != Verdict.PENDING && (active || record.flagged)) {
+                if (record.outcome != ReceiptOutcome.PENDING && (active || record.flagged)) {
                     ActionCard(record, active, action, onAction = {
                         action = it
                         flow?.action = it
@@ -127,7 +124,7 @@ fun ResultScreen(
                 if (record.note.isNotBlank()) {
                     VTCard {
                         Column(Modifier.padding(14.dp)) {
-                            Text("OFFICER NOTE", style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.SemiBold, fontSize = 10.sp, letterSpacing = 0.08.sp), color = VT.Muted)
+                            Text("RECEIVER NOTE", style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.SemiBold, fontSize = 10.sp, letterSpacing = 0.08.sp), color = VT.Muted)
                             Spacer(Modifier.height(6.dp))
                             Text(record.note, style = MaterialTheme.typography.bodyMedium, color = VT.Slate)
                         }
@@ -137,25 +134,17 @@ fun ResultScreen(
                 if (active) {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         com.veritransit.inspector.ui.components.PrimaryButton(
-                            text = "Confirm Verdict & Sign",
+                            text = "File Goods-Received Note",
                             icon = Icons.Rounded.HistoryEdu,
                             onClick = { showStamp = true },
                         )
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            SecondaryButton("Rescan Cargo", onRescan ?: {}, icon = Icons.Rounded.Refresh, modifier = Modifier.weight(1f))
+                            SecondaryButton("Re-count Delivery", onRecount ?: {}, icon = Icons.Rounded.Refresh, modifier = Modifier.weight(1f))
                             SecondaryButton("Add Note", { showNote = true }, icon = Icons.Rounded.Edit, modifier = Modifier.weight(1f))
                         }
                     }
                 } else {
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        if (record.flagged && !record.noticeIssued && onIssueNotice != null) {
-                            com.veritransit.inspector.ui.components.PrimaryButton(
-                                text = "Issue Notice MOV-04",
-                                icon = Icons.Rounded.Gavel,
-                                onClick = onIssueNotice,
-                                modifier = Modifier.weight(1.2f),
-                            )
-                        }
                         SecondaryButton("Print Summary", onPrint, icon = Icons.Rounded.Print, modifier = Modifier.weight(1f))
                     }
                 }
@@ -180,7 +169,7 @@ fun ResultScreen(
                     .background(Color(0xFF0C131C))
                     .padding(10.dp),
             ) {
-                val captured = flow?.cargoEvidence
+                val captured = flow?.dockEvidence
                 if (captured != null) {
                     EvidencePhoto(captured, Modifier.fillMaxWidth().height(320.dp))
                 } else {
@@ -212,7 +201,7 @@ fun ResultScreen(
 }
 
 @Composable
-private fun Header(record: InspectionRecord, onBack: () -> Unit) {
+private fun Header(record: ReceivingRecord, onBack: () -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -230,18 +219,35 @@ private fun Header(record: InspectionRecord, onBack: () -> Unit) {
             Icon(Icons.Rounded.Close, "Back", tint = VT.Ink, modifier = Modifier.size(22.dp))
         }
         Spacer(Modifier.size(8.dp))
-        Text("Verification Result", style = MaterialTheme.typography.headlineSmall, color = VT.Ink, modifier = Modifier.weight(1f))
-        Text(record.ewb, style = mono().dataSmall, color = VT.Muted)
+        Text("Receipt Result", style = MaterialTheme.typography.headlineSmall, color = VT.Ink, modifier = Modifier.weight(1f))
+        Text(record.id, style = mono().dataSmall, color = VT.Muted)
     }
     Box(Modifier.fillMaxWidth().height(1.dp).background(VT.Hairline))
 }
 
 @Composable
-private fun Banner(record: InspectionRecord) {
-    val (bg, line, accent, badge, badgeFg, title) = when {
-        record.verdict == Verdict.PENDING -> Quint(VT.Surface, VT.Hairline, VT.Slate, "PENDING", VT.Slate, "Verdict awaiting — consignment held at gate pending officer review.")
-        record.discrepancyCount > 0 -> Quint(VT.AmberBg, VT.AmberLine, VT.Amber, "REVIEW REQUIRED", VT.AmberDot, "Manifest discrepancy detected: item count mismatch & unlisted cargo.")
-        else -> Quint(VT.EmeraldBg, VT.EmeraldLine, VT.Emerald, "CLEARED", VT.Emerald, "Cargo reconciled with manifest. No discrepancies found.")
+private fun Banner(record: ReceivingRecord) {
+    val (bg, line, accent, badge, title) = when (record.outcome) {
+        ReceiptOutcome.PENDING -> Quint(
+            VT.Surface, VT.Hairline, VT.Slate, "PENDING",
+            "Awaiting dock count — the delivery is still on the dock pending the receiver's count.",
+        )
+        ReceiptOutcome.OK -> Quint(
+            VT.EmeraldBg, VT.EmeraldLine, VT.Emerald, "ACCEPTED",
+            "Received quantities agree with the packing list. Book the goods into stock.",
+        )
+        ReceiptOutcome.SHORT -> Quint(
+            VT.AmberBg, VT.AmberLine, VT.Amber, "SHORT",
+            "Fewer units arrived than the packing list declares — hold the delivery for a supervisor.",
+        )
+        ReceiptOutcome.OVER -> Quint(
+            VT.AmberBg, VT.AmberLine, VT.Amber, "OVER",
+            "More units arrived than the packing list declares — confirm the extra against the PO.",
+        )
+        ReceiptOutcome.MISMATCH -> Quint(
+            VT.CrimsonBg, VT.CrimsonLine, VT.Crimson, "MISMATCH",
+            "A line does not match the packing list: unlisted or damaged goods on the delivery.",
+        )
     }
     VTCard(bg = bg, border = false) {
         Column(
@@ -282,7 +288,16 @@ private fun Banner(record: InspectionRecord) {
                 }
             }
             Spacer(Modifier.height(10.dp))
-            Text(title, style = MaterialTheme.typography.titleSmall.copy(fontSize = 15.sp), color = Color(0xFF78350F).takeIf { record.discrepancyCount > 0 } ?: VT.Slate, lineHeight = 21.sp)
+            Text(
+                title,
+                style = MaterialTheme.typography.titleSmall.copy(fontSize = 15.sp),
+                color = when (record.outcome) {
+                    ReceiptOutcome.MISMATCH -> Color(0xFF9F1239)
+                    ReceiptOutcome.SHORT, ReceiptOutcome.OVER -> Color(0xFF78350F)
+                    else -> VT.Slate
+                },
+                lineHeight = 21.sp,
+            )
         }
     }
 }
@@ -292,10 +307,16 @@ private fun Float.format1(): String {
     return if (rounded == rounded.toInt().toDouble()) rounded.toInt().toString() else rounded.toString()
 }
 
-private data class Quint(val bg: Color, val line: Color, val accent: Color, val badge: String, val badgeFg: Color, val title: String)
+private data class Quint(
+    val bg: Color,
+    val line: Color,
+    val accent: Color,
+    val badge: String,
+    val title: String,
+)
 
 @Composable
-private fun ReconciliationCard(record: InspectionRecord) {
+private fun CountCard(record: ReceivingRecord) {
     VTCard {
         Column {
             Row(
@@ -306,12 +327,12 @@ private fun ReconciliationCard(record: InspectionRecord) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    "CARGO RECONCILIATION",
+                    "PACKED VS RECEIVED",
                     style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.SemiBold, fontSize = 11.5.sp, letterSpacing = 0.09.sp),
                     color = VT.Slate,
                     modifier = Modifier.weight(1f),
                 )
-                Text("${record.items.size} Items Checked", style = MaterialTheme.typography.bodySmall, color = VT.Muted)
+                Text("${record.items.size} Lines Checked", style = MaterialTheme.typography.bodySmall, color = VT.Muted)
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(VT.Hairline))
             record.items.forEachIndexed { i, item ->
@@ -325,15 +346,21 @@ private fun ReconciliationCard(record: InspectionRecord) {
                         Text(
                             item.name,
                             style = MaterialTheme.typography.titleMedium.copy(fontSize = 15.sp),
-                            color = if (item.status == ItemStatus.UNLISTED) VT.Crimson else VT.Ink,
+                            color = if (item.status == ItemStatus.UNLISTED || item.status == ItemStatus.DAMAGED) VT.Crimson else VT.Ink,
                         )
-                        Text("Expected ${item.expected} · Found ${item.found}", style = MaterialTheme.typography.bodySmall, color = VT.Muted)
+                        Text(
+                            "Packed ${item.expected} · Received ${item.received}" +
+                                if (item.damaged > 0) " · Damaged ${item.damaged}" else "",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = VT.Muted,
+                        )
                     }
                     when (item.status) {
                         ItemStatus.MATCHED -> MatchBadge()
-                        ItemStatus.SHORTAGE -> StatusChip("Shortage (-${item.expected - item.found})", VT.AmberBg, VT.Amber, VT.AmberLine, withDot = false)
-                        ItemStatus.OVERAGE -> StatusChip("Overage (+${item.found - item.expected})", VT.AmberBg, VT.Amber, VT.AmberLine, withDot = false)
-                        ItemStatus.UNLISTED -> StatusChip("Unlisted (+${item.found})", VT.CrimsonBg, VT.Crimson, VT.CrimsonLine, withDot = false)
+                        ItemStatus.SHORT -> StatusChip("Short (-${item.expected - item.received})", VT.AmberBg, VT.Amber, VT.AmberLine, withDot = false)
+                        ItemStatus.OVER -> StatusChip("Over (+${item.received - item.expected})", VT.AmberBg, VT.Amber, VT.AmberLine, withDot = false)
+                        ItemStatus.UNLISTED -> StatusChip("Unlisted (+${item.received})", VT.CrimsonBg, VT.Crimson, VT.CrimsonLine, withDot = false)
+                        ItemStatus.DAMAGED -> StatusChip("Damaged (${item.damaged})", VT.CrimsonBg, VT.Crimson, VT.CrimsonLine, withDot = false)
                     }
                 }
                 if (i < record.items.lastIndex) {
@@ -364,22 +391,24 @@ private fun MatchBadge() {
  * Caption for the vector illustration shown when no captured photo exists.
  * The clock time comes from the record itself — no fixed sample string.
  */
-private fun evidenceTimestamp(record: InspectionRecord): String {
+private fun evidenceTimestamp(record: ReceivingRecord): String {
     val time = runCatching {
         java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
             .format(java.util.Date(record.timestamp))
     }.getOrNull() ?: "--:--:--"
-    return "$time · GPS Verified"
+    return "$time · Dock"
 }
 
-private fun evidenceBoxes(record: InspectionRecord): List<Bounds> {    val boxes = mutableListOf(
+private fun evidenceBoxes(record: ReceivingRecord): List<Bounds> {
+    val boxes = mutableListOf(
         Bounds(0.05f, 0.28f, 0.22f, 0.34f, Color(0xFF34D399), "OK"),
     )
     record.items.forEach { item ->
         when (item.status) {
-            ItemStatus.SHORTAGE -> boxes += Bounds(0.70f, 0.32f, 0.24f, 0.32f, Color(0xFFF59E0B), "-${item.expected - item.found}")
-            ItemStatus.OVERAGE -> boxes += Bounds(0.70f, 0.32f, 0.24f, 0.32f, Color(0xFFF59E0B), "+${item.found - item.expected}")
+            ItemStatus.SHORT -> boxes += Bounds(0.70f, 0.32f, 0.24f, 0.32f, Color(0xFFF59E0B), "-${item.expected - item.received}")
+            ItemStatus.OVER -> boxes += Bounds(0.70f, 0.32f, 0.24f, 0.32f, Color(0xFFF59E0B), "+${item.received - item.expected}")
             ItemStatus.UNLISTED -> boxes += Bounds(0.42f, 0.55f, 0.26f, 0.30f, Color(0xFFF43F5E), "NEW")
+            ItemStatus.DAMAGED -> boxes += Bounds(0.42f, 0.55f, 0.26f, 0.30f, Color(0xFFF43F5E), "DMG")
             else -> Unit
         }
     }
@@ -394,7 +423,7 @@ private fun EvidencePhoto(path: String, modifier: Modifier = Modifier) {
     if (bitmap != null) {
         Image(
             bitmap = bitmap.asImageBitmap(),
-            contentDescription = "Evidence photo captured this inspection",
+            contentDescription = "Evidence photo captured for this receipt",
             contentScale = ContentScale.Crop,
             modifier = modifier.clip(RoundedCornerShape(8.dp)),
         )
@@ -404,13 +433,13 @@ private fun EvidencePhoto(path: String, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun EvidenceSection(record: InspectionRecord, evidencePath: String?, onZoom: () -> Unit) {
+private fun EvidenceSection(record: ReceivingRecord, evidencePath: String?, onZoom: () -> Unit) {
     Column {
         SectionLabel(
-            "Evidence Scan",
+            "Evidence Photo",
             trailing = {
                 Text(
-                    if (evidencePath != null) "This inspection" else "Illustration",
+                    if (evidencePath != null) "This receipt" else "Illustration",
                     style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Medium, fontSize = 11.sp),
                     color = VT.Muted,
                 )
@@ -442,14 +471,14 @@ private fun EvidenceSection(record: InspectionRecord, evidencePath: String?, onZ
 }
 
 @Composable
-private fun ActionCard(record: InspectionRecord, active: Boolean, action: OfficerAction, onAction: (OfficerAction) -> Unit) {
+private fun ActionCard(record: ReceivingRecord, active: Boolean, action: ReceivingAction, onAction: (ReceivingAction) -> Unit) {
     VTCard {
         Column(Modifier.padding(16.dp)) {
-            Text("Officer Statutory Action", style = MaterialTheme.typography.titleLarge, color = VT.Ink)
-            Text("Select determination for this consignment", style = MaterialTheme.typography.bodySmall, color = VT.Muted)
+            Text("Receiving Action", style = MaterialTheme.typography.titleLarge, color = VT.Ink)
+            Text("What to do with this delivery", style = MaterialTheme.typography.bodySmall, color = VT.Muted)
             Spacer(Modifier.height(14.dp))
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                OfficerAction.entries.forEach { a ->
+                ReceivingAction.entries.forEach { a ->
                     ActionOption(
                         selected = action == a,
                         title = a.title,
@@ -511,7 +540,7 @@ private fun ActionOption(selected: Boolean, title: String, detail: String, onCli
 /* ------------------------------ Stamp overlay ------------------------------ */
 
 @Composable
-private fun StampOverlay(visible: Boolean, action: OfficerAction, onDone: () -> Unit) {
+private fun StampOverlay(visible: Boolean, action: ReceivingAction, onDone: () -> Unit) {
     androidx.compose.runtime.LaunchedEffect(visible) {
         if (visible) {
             kotlinx.coroutines.delay(1450)
@@ -530,14 +559,15 @@ private fun StampOverlay(visible: Boolean, action: OfficerAction, onDone: () -> 
             contentAlignment = Alignment.Center,
         ) {
             val stampColor = when (action) {
-                OfficerAction.CLEAR -> VT.Emerald
-                OfficerAction.RECOUNT -> VT.AmberDot
-                OfficerAction.DETAIN -> VT.Crimson
+                ReceivingAction.ACCEPT -> VT.Emerald
+                ReceivingAction.RECOUNT -> VT.AmberDot
+                ReceivingAction.FLAG, ReceivingAction.NOT_RECEIVED -> VT.Crimson
             }
             val stampText = when (action) {
-                OfficerAction.CLEAR -> "CLEARED"
-                OfficerAction.RECOUNT -> "RE-COUNT ORDERED"
-                OfficerAction.DETAIN -> "DETAINED"
+                ReceivingAction.ACCEPT -> "ACCEPTED"
+                ReceivingAction.RECOUNT -> "RE-COUNT REQUESTED"
+                ReceivingAction.FLAG -> "FLAGGED"
+                ReceivingAction.NOT_RECEIVED -> "NOT RECEIVED"
             }
             var stampIn by remember { mutableStateOf(false) }
             LaunchedEffect(Unit) { stampIn = true }
@@ -564,7 +594,7 @@ private fun StampOverlay(visible: Boolean, action: OfficerAction, onDone: () -> 
                 }
                 Spacer(Modifier.height(5.dp))
                 Text(
-                    "Signed · ${com.veritransit.inspector.data.Repo.INSPECTOR} ${com.veritransit.inspector.data.Repo.BADGE}",
+                    "Filed by ${com.veritransit.inspector.data.Repo.RECEIVER} · ${com.veritransit.inspector.data.Repo.WAREHOUSE}",
                     style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Medium, fontSize = 10.5.sp),
                     color = VT.Muted,
                 )
@@ -578,7 +608,7 @@ private fun StampOverlay(visible: Boolean, action: OfficerAction, onDone: () -> 
 @Composable
 private fun NoteDialog(
     initial: String,
-    record: InspectionRecord,
+    record: ReceivingRecord,
     onSave: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -591,16 +621,16 @@ private fun NoteDialog(
         if (drafting) return
         drafting = true
         draftError = null
-        // Whatever the officer had written survives a failed draft — with the
+        // Whatever the receiver had written survives a failed draft — with the
         // cloud leg in the path, failures are ordinary (offline, out of credit).
         val previous = text
         text = ""
         scope.launch {
             try {
-                // Streamed so the officer watches it appear rather than waiting
+                // Streamed so the receiver watches it appear rather than waiting
                 // on a spinner — decode is ~30 tok/s on the NPU, long enough
                 // to notice.
-                InspectorAi.draftNote(
+                ReceivingAi.draftNote(
                     record,
                     onToken = { token ->
                         scope.launch(Dispatchers.Main) { text += token }
@@ -628,9 +658,9 @@ private fun NoteDialog(
     Dialog(onDismissRequest = onDismiss) {
         VTCard(radius = 12.dp) {
             Column(Modifier.padding(18.dp)) {
-                Text("Add Officer Note", style = MaterialTheme.typography.titleLarge, color = VT.Ink)
+                Text("Add Receiver Note", style = MaterialTheme.typography.titleLarge, color = VT.Ink)
                 Spacer(Modifier.height(4.dp))
-                Text("Appended to the permanent audit trail", style = MaterialTheme.typography.bodySmall, color = VT.Muted)
+                Text("Saved with the goods-received note", style = MaterialTheme.typography.bodySmall, color = VT.Muted)
                 Spacer(Modifier.height(14.dp))
                 BasicTextField(
                     value = text,
