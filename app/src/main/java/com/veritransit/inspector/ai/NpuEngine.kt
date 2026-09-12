@@ -3,6 +3,7 @@ package com.veritransit.inspector.ai
 import android.content.Context
 import android.os.Build
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -159,6 +160,25 @@ object NpuEngine {
     /** One NPU context; concurrent generate calls would corrupt its KV cache. */
     private val inferenceLock = Mutex()
 
+    /**
+     * Serialises creating and destroying the NPU session. Without it an
+     * unload landing between a load's state check and its assignment would
+     * strand a resident wrapper the engine no longer knows about — cDSP memory
+     * held until the process dies.
+     */
+    private val lifecycleMutex = Mutex()
+
+    /** [SystemClock.elapsedRealtime] of the last load or inference completion. */
+    @Volatile
+    private var lastUsedAt = 0L
+
+    /** Whether the host activity is started; drives the background unload. */
+    @Volatile
+    private var hostInForeground = true
+
+    private var backgroundUnloadJob: Job? = null
+    private var watchdogStarted = false
+
     /** Catalog name resolved at init; falls back to [MODEL_NAME]. */
     private var hubModelName: String = MODEL_NAME
 
@@ -179,6 +199,7 @@ object NpuEngine {
         if (status != Status.COLD && status != Status.ERROR) return
         appContext = context.applicationContext
         status = Status.INITIALIZING
+        startResidencyWatchdog()
         scope.launch {
             try {
                 if (!sdkInitialised) {
@@ -365,62 +386,78 @@ object NpuEngine {
         lastError = null
         scope.launch {
             try {
-                val paths = ModelManagerWrapper.getPaths(hubModelName)
-                if (paths == null) {
-                    status = Status.NOT_DOWNLOADED
-                    lastError = "Model bundle not on disk — download it first."
-                    return@launch
-                }
-                // The bundle's manifest names the runtime it was compiled for.
-                // Anything but qairt means we pulled a GGUF by mistake and would
-                // silently land on the CPU.
-                val runtimeId = paths.runtime_id.ifEmpty { RUNTIME_QAIRT }
-                if (runtimeId != RUNTIME_QAIRT) {
-                    fail("Bundle is '$runtimeId', not an NPU (qairt) build.")
-                    return@launch
-                }
-                // QAIRT rejects non-zero n_ctx / n_gpu_layers: both are baked in
-                // at compile time in the AI Hub bundle and cannot be overridden.
-                val config = ModelConfig(nCtx = 0, nGpuLayers = 0, nThreads = 8)
-                val input = VlmCreateInput(
-                    model_path = paths.model_path,
-                    mmproj_path = paths.mmproj_path,
-                    config = config,
-                    runtime_id = runtimeId,
-                    compute_unit = COMPUTE_UNIT,
-                )
+                lifecycleMutex.withLock {
+                    // An unload may have completed while this call was being
+                    // scheduled; trust the mutex-protected state, not the
+                    // pre-lock check above.
+                    if (vlm != null) {
+                        status = Status.READY
+                        return@withLock
+                    }
+                    val paths = ModelManagerWrapper.getPaths(hubModelName)
+                    if (paths == null) {
+                        status = Status.NOT_DOWNLOADED
+                        lastError = "Model bundle not on disk — download it first."
+                        return@withLock
+                    }
+                    // The bundle's manifest names the runtime it was compiled for.
+                    // Anything but qairt means we pulled a GGUF by mistake and would
+                    // silently land on the CPU.
+                    val runtimeId = paths.runtime_id.ifEmpty { RUNTIME_QAIRT }
+                    if (runtimeId != RUNTIME_QAIRT) {
+                        fail("Bundle is '$runtimeId', not an NPU (qairt) build.")
+                        return@withLock
+                    }
+                    // QAIRT rejects non-zero n_ctx / n_gpu_layers: both are baked in
+                    // at compile time in the AI Hub bundle and cannot be overridden.
+                    val config = ModelConfig(nCtx = 0, nGpuLayers = 0, nThreads = 8)
+                    val input = VlmCreateInput(
+                        model_path = paths.model_path,
+                        mmproj_path = paths.mmproj_path,
+                        config = config,
+                        runtime_id = runtimeId,
+                        compute_unit = COMPUTE_UNIT,
+                    )
 
-                // The bundle is four weight-shared context binaries. Creating
-                // them asks the DSP for a large block up front, and when
-                // something else on the phone is already holding cDSP memory the
-                // third one comes back QNN_COMMON_ERROR_RESOURCE_UNAVAILABLE
-                // (1007). That clears on its own once the other client lets go,
-                // so the load is retried before it is called a failure.
-                var lastError: Throwable? = null
-                for (attempt in 1..LOAD_ATTEMPTS) {
-                    val result = VlmWrapper.builder().vlmCreateInput(input).build()
-                    result.onSuccess { wrapper ->
-                        vlm = wrapper
+                    // The bundle is four weight-shared context binaries. Creating
+                    // them asks the DSP for a large block up front, and when
+                    // something else on the phone is already holding cDSP memory the
+                    // third one comes back QNN_COMMON_ERROR_RESOURCE_UNAVAILABLE
+                    // (1007). That clears on its own once the other client lets go,
+                    // so the load is retried before it is called a failure.
+                    var created: VlmWrapper? = null
+                    var lastLoadError: Throwable? = null
+                    var attempt = 0
+                    while (created == null && attempt < LOAD_ATTEMPTS) {
+                        attempt++
+                        val result = VlmWrapper.builder().vlmCreateInput(input).build()
+                        created = result.getOrNull()
+                        if (created == null) {
+                            lastLoadError = result.exceptionOrNull()
+                            Log.w(TAG, "load attempt $attempt/$LOAD_ATTEMPTS failed: ${lastLoadError?.message}")
+                            if (attempt < LOAD_ATTEMPTS) delay(attempt * LOAD_RETRY_BACKOFF_MS)
+                        }
+                    }
+
+                    if (created != null) {
+                        vlm = created
                         loadFailures = 0
+                        lastUsedAt = SystemClock.elapsedRealtime()
                         status = Status.READY
                         Log.i(TAG, "Qwen3-VL-4B resident on $COMPUTE_UNIT (attempt $attempt)")
-                        return@launch
+                    } else {
+                        loadFailures++
+                        // Nothing in this process can release another client's DSP
+                        // allocation, and our own stranded contexts only go when the
+                        // process does — so say what actually helps.
+                        val hint = if (loadFailures > 1) {
+                            " The NPU is busy. Close other AI apps, or restart this app."
+                        } else {
+                            ""
+                        }
+                        fail("Load failed: ${lastLoadError?.message}.$hint")
                     }
-                    lastError = result.exceptionOrNull()
-                    Log.w(TAG, "load attempt $attempt/$LOAD_ATTEMPTS failed: ${lastError?.message}")
-                    if (attempt < LOAD_ATTEMPTS) delay(attempt * LOAD_RETRY_BACKOFF_MS)
                 }
-
-                loadFailures++
-                // Nothing in this process can release another client's DSP
-                // allocation, and our own stranded contexts only go when the
-                // process does — so say what actually helps.
-                val hint = if (loadFailures > 1) {
-                    " The NPU is busy. Close other AI apps, or restart this app."
-                } else {
-                    ""
-                }
-                fail("Load failed: ${lastError?.message}.$hint")
             } catch (e: Exception) {
                 fail("Load failed: ${e.message}")
             }
@@ -458,14 +495,16 @@ object NpuEngine {
     fun unload() {
         scope.launch {
             inferenceLock.withLock {
-                vlm?.let { w ->
-                    runCatching { w.stopStream() }
-                    runCatching { w.destroy() }
+                lifecycleMutex.withLock {
+                    vlm?.let { w ->
+                        runCatching { w.stopStream() }
+                        runCatching { w.destroy() }
+                    }
+                    vlm = null
+                    lastProfile = null
+                    activity = null
+                    status = if (isBundleCached()) Status.DOWNLOADED else Status.NOT_DOWNLOADED
                 }
-                vlm = null
-                lastProfile = null
-                activity = null
-                status = if (isBundleCached()) Status.DOWNLOADED else Status.NOT_DOWNLOADED
             }
         }
     }
@@ -478,6 +517,9 @@ object NpuEngine {
      * independent matters on a fixed 4096-token context — an inspection shift
      * would otherwise overflow it after a handful of photos.
      *
+     * If the session was released (idle/background unload) the cached bundle is
+     * made resident again first — [awaitResident] blocks until it is ready.
+     *
      * [onToken] fires on a background thread for each decoded token.
      */
     suspend fun run(
@@ -489,8 +531,9 @@ object NpuEngine {
         label: String? = null,
         onToken: (String) -> Unit = {},
     ): Result<String> {
-        val wrapper = vlm ?: return Result.failure(IllegalStateException("Model not loaded"))
+        awaitResident() ?: return Result.failure(IllegalStateException(notResidentReason()))
         return inferenceLock.withLock {
+            val w = vlm ?: return@withLock Result.failure(IllegalStateException("Model was unloaded — try again"))
             status = Status.BUSY
             activity = label
             try {
@@ -508,10 +551,11 @@ object NpuEngine {
                     add(userTurn)
                 }
                 withContext(Dispatchers.IO) {
-                    generate(wrapper, turns, userTurn, maxTokens, temperature, onToken)
+                    generate(w, turns, userTurn, maxTokens, temperature, onToken)
                 }
             } finally {
                 activity = null
+                lastUsedAt = SystemClock.elapsedRealtime()
                 if (status == Status.BUSY) status = Status.READY
             }
         }
@@ -533,19 +577,54 @@ object NpuEngine {
         temperature: Float = 0.7f,
         onToken: (String) -> Unit = {},
     ): Result<String> {
-        val wrapper = vlm ?: return Result.failure(IllegalStateException("Model not loaded"))
+        awaitResident() ?: return Result.failure(IllegalStateException(notResidentReason()))
         return inferenceLock.withLock {
+            val w = vlm ?: return@withLock Result.failure(IllegalStateException("Model was unloaded — try again"))
             status = Status.BUSY
             activity = "Thinking"
             try {
                 withContext(Dispatchers.IO) {
-                    generate(wrapper, turns, mediaTurn, maxTokens, temperature, onToken)
+                    generate(w, turns, mediaTurn, maxTokens, temperature, onToken)
                 }
             } finally {
                 activity = null
+                lastUsedAt = SystemClock.elapsedRealtime()
                 if (status == Status.BUSY) status = Status.READY
             }
         }
+    }
+
+    /**
+     * Returns the resident wrapper, bringing the cached bundle back onto the
+     * NPU first if residency was released. Returns null — with [notResidentReason]
+     * explaining — when residency cannot be reached (nothing on disk, engine
+     * error, or a load that never finished).
+     */
+    private suspend fun awaitResident(): VlmWrapper? {
+        vlm?.let { return it }
+        when (status) {
+            Status.DOWNLOADED -> {
+                activity = "Waking the NPU"
+                load()
+            }
+            Status.LOADING, Status.READY, Status.BUSY -> Unit
+            else -> return null
+        }
+        val deadline = SystemClock.elapsedRealtime() + LOAD_WAIT_TIMEOUT_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            vlm?.let { return it }
+            if (status == Status.ERROR) break
+            delay(250)
+        }
+        activity = null
+        return null
+    }
+
+    private fun notResidentReason(): String = when (status) {
+        Status.NOT_DOWNLOADED -> "Model bundle not on disk — install it from the On-device AI screen."
+        Status.DOWNLOADING -> "Model bundle is still downloading."
+        Status.ERROR -> lastError ?: "Engine error — retry from the On-device AI screen."
+        else -> "Model is not resident yet — try again shortly."
     }
 
     private suspend fun generate(
@@ -594,6 +673,54 @@ object NpuEngine {
         scope.launch { runCatching { vlm?.stopStream() } }
     }
 
+    // ------------------------------------------------- residency lifecycle
+
+    /**
+     * Called by the host activity when it stops being visible. Schedules the
+     * release of the NPU session once [BACKGROUND_UNLOAD_GRACE_MS] have passed,
+     * so a brief detour to another app does not pay the load cost, but the cDSP
+     * memory is not held for the whole time the app sits in the background.
+     */
+    fun onHostBackgrounded() {
+        hostInForeground = false
+        backgroundUnloadJob?.cancel()
+        backgroundUnloadJob = scope.launch {
+            delay(BACKGROUND_UNLOAD_GRACE_MS)
+            if (!hostInForeground && isReady) {
+                Log.i(TAG, "backgrounded > ${BACKGROUND_UNLOAD_GRACE_MS / 1000} s — releasing the NPU session")
+                unload()
+            }
+        }
+    }
+
+    /** Called by the host activity when it becomes visible again. */
+    fun onHostForegrounded() {
+        hostInForeground = true
+        backgroundUnloadJob?.cancel()
+        backgroundUnloadJob = null
+    }
+
+    /**
+     * Releases the session after [IDLE_UNLOAD_MS] without an inference, in the
+     * foreground as well — residency nobody is using is cDSP memory some other
+     * client (or our own next load) cannot get.
+     */
+    private fun startResidencyWatchdog() {
+        if (watchdogStarted) return
+        watchdogStarted = true
+        scope.launch {
+            while (true) {
+                delay(WATCHDOG_TICK_MS)
+                if (!isReady) continue
+                val idleMs = SystemClock.elapsedRealtime() - lastUsedAt
+                if (idleMs >= IDLE_UNLOAD_MS) {
+                    Log.i(TAG, "idle ${idleMs / 1000} s — releasing the NPU session")
+                    unload()
+                }
+            }
+        }
+    }
+
     // ------------------------------------------------------------- helpers
 
     private fun fail(message: String) {
@@ -610,4 +737,16 @@ object NpuEngine {
 
     /** Multiplied by the attempt number, so gaps grow: 2 s, then 4 s. */
     private const val LOAD_RETRY_BACKOFF_MS = 2_000L
+
+    /** Idle time after which a resident session is released, freeing cDSP memory. */
+    private const val IDLE_UNLOAD_MS = 5 * 60 * 1000L
+
+    /** Background time after which a resident session is released. */
+    private const val BACKGROUND_UNLOAD_GRACE_MS = 60 * 1000L
+
+    /** How long an inference caller waits for an on-demand reload to finish. */
+    private const val LOAD_WAIT_TIMEOUT_MS = 90 * 1000L
+
+    /** Watchdog polling period. */
+    private const val WATCHDOG_TICK_MS = 15_000L
 }

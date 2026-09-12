@@ -153,6 +153,7 @@ fun NpuScreen(onBack: () -> Unit, onToast: (String) -> Unit, onOpenChat: () -> U
                     SpecRow("Chipset", NpuEngine.chipset ?: "detecting…")
                     SpecRow("Context", "${NpuEngine.CONTEXT_TOKENS} tokens")
                     SpecRow("Bundle", gib(NpuEngine.BUNDLE_BYTES))
+                    SpecRow("Residency", "Auto-release · auto-reload")
                 }
             }
 
