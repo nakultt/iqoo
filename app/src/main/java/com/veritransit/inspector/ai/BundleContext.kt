@@ -42,7 +42,16 @@ object BundleContext {
      * [fallback], because a missing signal must never become a budget the
      * runtime cannot honour.
      */
-    fun parseContextSize(genieConfigJson: String, fallback: Int = DEFAULT_CONTEXT_TOKENS): Int {
+    fun parseContextSize(genieConfigJson: String, fallback: Int = DEFAULT_CONTEXT_TOKENS): Int =
+        parseContextSizeOrNull(genieConfigJson) ?: fallback
+
+    /**
+     * The declared window, or null when the config is missing, malformed, or
+     * out of range. Null is distinguishable from [DEFAULT_CONTEXT_TOKENS] —
+     * callers that report *where* a number came from need that difference
+     * (a fallback is an assumption, not a bundle declaration).
+     */
+    fun parseContextSizeOrNull(genieConfigJson: String): Int? {
         val size = runCatching {
             Json.parseToJsonElement(genieConfigJson)
                 .jsonObject["dialog"]
@@ -50,7 +59,7 @@ object BundleContext {
                 ?.jsonObject?.get("size")
                 ?.jsonPrimitive?.intOrNull
         }.getOrNull()
-        return if (size != null && size in MIN_CONTEXT_TOKENS..MAX_CONTEXT_TOKENS) size else fallback
+        return size?.takeIf { it in MIN_CONTEXT_TOKENS..MAX_CONTEXT_TOKENS }
     }
 
     /** Prompt tokens usable when [replyTokens] must still fit the window. */

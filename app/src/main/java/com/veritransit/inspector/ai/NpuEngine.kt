@@ -743,9 +743,12 @@ object NpuEngine {
             ?.takeIf { it.isFile }
             ?.let { runCatching { it.readText() }.getOrNull() }
             ?: return
-        bundleContextTokens = BundleContext.parseContextSize(config, fallback = bundleContextTokens)
+        // A malformed config keeps the current tokens AND the provenance flag:
+        // an assumption must not start reporting itself as a bundle declaration.
+        val declared = BundleContext.parseContextSizeOrNull(config) ?: return
+        bundleContextTokens = declared
         contextFromBundle = true
-        Log.i(TAG, "bundle context window: $bundleContextTokens tokens")
+        Log.i(TAG, "bundle context window: $declared tokens (from bundle config)")
     }
 
     /** Aborts the in-flight generation; the coroutine unwinds via Completed. */
