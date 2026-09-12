@@ -58,6 +58,9 @@ class WarehouseViewModel(app: Application) : AndroidViewModel(app) {
         _selected.value = ref
         handledThisSession.clear()
         _verdict.value = null
+        // A fresh shipment may have fresh keys (e.g. a device-local key pinned by
+        // a quick-ship that happened after the engine was built) — rebuild.
+        engine = null
         refreshCounts()
     }
 
@@ -101,6 +104,20 @@ class WarehouseViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearVerdict() { _verdict.value = null }
 
+    /**
+     * Single-phone demo path: feeds the next unscanned carton's signed label
+     * through the exact same verdict pipeline the camera would. It exists so a
+     * sender and receiver can share one handset with the QRs on screen.
+     */
+    fun simulateScan(kind: ScanKind) {
+        val ref = _selected.value ?: return
+        viewModelScope.launch {
+            val next = repo.notYetScanned(ref).firstOrNull() ?: return@launch
+            val payload = next.labelPayload ?: return@launch
+            onCodes(payload, null, kind)
+        }
+    }
+
     /** Lets the officer re-scan a carton they deliberately want to re-check. */
     fun forgetSession() = handledThisSession.clear()
 
@@ -109,6 +126,7 @@ class WarehouseViewModel(app: Application) : AndroidViewModel(app) {
             _syncing.value = true
             runCatching { repo.drainOutbox() }
             runCatching { repo.refreshBootstrap() }
+            engine = null   // bootstrap may have rotated keys
             _syncing.value = false
             refreshCounts()
         }

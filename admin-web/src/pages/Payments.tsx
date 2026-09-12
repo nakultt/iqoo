@@ -28,9 +28,21 @@ export default function Payments() {
   }
 
   const act = useMutation({
-    mutationFn: async ({ kind, ref, note }: { kind: string; ref: string; note?: string }) => {
-      if (kind === 'release') return api.requestRelease(ref, undefined, note)
+    mutationFn: async ({ kind, ref, note, amount }: {
+      kind: string; ref: string; note?: string; amount?: string
+    }) => {
+      // Money inputs are validated client-side because the server's fallback
+      // for a bad one is dangerous: a NaN/null release amount means "release
+      // everything", and a zero hold would silently block all release.
+      const value = amount !== undefined && amount.trim() !== '' ? Number(amount) : undefined
+      if (value !== undefined && (!Number.isFinite(value) || value <= 0))
+        throw new Error('Enter a valid positive amount.')
+      if (kind === 'release') return api.requestRelease(ref, value, note)
       if (kind === 'approve') return api.approveRelease(ref)
+      if (kind === 'hold') {
+        if (value === undefined) throw new Error('A hold needs an amount.')
+        return api.hold(ref, value, note ?? '')
+      }
       return api.resolveHold(ref, note ?? '')
     },
     onSuccess: (res) => { setMessage({ tone: 'ok', text: res.message }); refresh() },
@@ -96,18 +108,52 @@ export default function Payments() {
         )} />
 
       <Queue title="Release-ready"
-        sub="Four-way match is clean. A finance maker raises the request."
+        sub="Four-way match is clean. A finance maker raises the request — full or partial."
         rows={verified.data} tone="ok"
-        action={(f) => (
-          <button className="small primary" disabled={act.isPending}
-            onClick={() => act.mutate({ kind: 'release', ref: f.shipmentRef, note: 'released from the payments console' })}>
-            Request release
-          </button>
-        )} />
+        action={(f) => <ReleaseReadyActions f={f} act={act} />} />
 
       <Queue title="Released" sub="Signed certificates delivered to the payer."
         rows={released.data} tone="dim" />
     </>
+  )
+}
+
+/**
+ * Per-row actions for release-ready shipments: a partial amount (the disputed
+ * delta stays held), or an explicit hold — the human override leg the server
+ * already supports but this console never exposed.
+ */
+function ReleaseReadyActions({ f, act }: {
+  f: FinanceState
+  act: { isPending: boolean; mutate: (v: { kind: string; ref: string; note?: string; amount?: string }) => void }
+}) {
+  const [amount, setAmount] = useState('')
+  const releasable = f.orderValue - f.heldValue
+  return (
+    <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+      <input className="mono tiny" style={{ width: 120, textAlign: 'right' }}
+        title="Blank = release the full releasable value"
+        placeholder={`full ${inr(releasable)}`}
+        value={amount} onChange={(e) => setAmount(e.target.value)} />
+      <button className="small primary" disabled={act.isPending}
+        onClick={() => {
+          const note = prompt('Note for the audit chain (optional):') ?? undefined
+          act.mutate({ kind: 'release', ref: f.shipmentRef, amount, note })
+        }}>
+        Request release
+      </button>
+      <button className="small" disabled={act.isPending}
+        title="Withhold value pending review"
+        onClick={() => {
+          const a = prompt('Amount to hold (₹):', String(releasable))
+          if (a === null) return
+          const reason = prompt('Reason for the hold:')
+          if (!reason) return
+          act.mutate({ kind: 'hold', ref: f.shipmentRef, amount: a, note: reason })
+        }}>
+        Place hold
+      </button>
+    </div>
   )
 }
 

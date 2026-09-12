@@ -4,6 +4,8 @@ import com.veritransit.core.ActivateRequest
 import com.veritransit.core.ActivateResponse
 import com.veritransit.core.BootstrapResponse
 import com.veritransit.core.PodSubmission
+import com.veritransit.core.QuickShipRequest
+import com.veritransit.core.QuickShipResponse
 import com.veritransit.core.ScanBatchRequest
 import com.veritransit.core.ScanBatchResponse
 import com.veritransit.core.ScanEvent
@@ -72,6 +74,13 @@ class ApiClient(
         client.post("$baseUrl/v1/scans:batch") {
             contentType(ContentType.Application.Json)
             setBody(ScanBatchRequest(events))
+        }.body()
+
+    /** The one-tap send — shipment, signed labels, paperwork and finance in one call. */
+    suspend fun quickShip(req: QuickShipRequest): QuickShipResponse =
+        client.post("$baseUrl/v1/quick-ship") {
+            contentType(ContentType.Application.Json)
+            setBody(req)
         }.body()
 
     suspend fun report(ref: String): ShipmentReport =

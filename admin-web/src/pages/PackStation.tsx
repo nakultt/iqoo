@@ -76,7 +76,7 @@ export default function PackStation() {
             ))}
           </select>
         </div>
-        {open.length === 0 && <p className="tiny muted">No open shipments. Create one from the API or the Shipments page.</p>}
+        {open.length === 0 && <p className="tiny muted">No open shipments. Create one from the Shipments page.</p>}
       </div>
 
       <div className="grid two">

@@ -26,11 +26,8 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.History
-import androidx.compose.material.icons.rounded.Inventory2
-import androidx.compose.material.icons.rounded.Home
-import androidx.compose.material.icons.rounded.QrCodeScanner
-import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.CallReceived
+import androidx.compose.material.icons.rounded.Send
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -46,60 +43,32 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.veritransit.inspector.data.InspectionRecord
-import com.veritransit.inspector.data.ItemStatus
-import com.veritransit.inspector.data.OfficerAction
-import com.veritransit.inspector.data.Repo
-import com.veritransit.inspector.data.Verdict
 import com.veritransit.inspector.ui.components.ToastBar
-import com.veritransit.inspector.ui.screens.CargoScanScreen
 import com.veritransit.inspector.ui.screens.AppSettings
-import com.veritransit.inspector.ui.screens.HomeScreen
-import com.veritransit.inspector.ui.screens.ChatScreen
-import com.veritransit.inspector.ui.screens.ManifestScreen
-import com.veritransit.inspector.ui.screens.NpuScreen
-import com.veritransit.inspector.ui.screens.RecordsScreen
-import com.veritransit.inspector.ui.screens.ResultScreen
-import com.veritransit.inspector.ui.screens.ScanScreen
-import com.veritransit.inspector.ui.screens.SettingsScreen
-import com.veritransit.inspector.ui.warehouse.DeviceSetupPanel
 import com.veritransit.inspector.ui.warehouse.LoadReconciliationScreen
 import com.veritransit.inspector.ui.warehouse.PackageScanScreen
 import com.veritransit.inspector.ui.warehouse.ShipmentListScreen
 import com.veritransit.inspector.ui.warehouse.WarehouseViewModel
 import com.veritransit.inspector.ui.theme.Hanken
 import com.veritransit.inspector.ui.theme.VT
-import kotlin.random.Random
 
 private enum class Tab(val label: String, val icon: ImageVector) {
-    HOME("Home", Icons.Rounded.Home),
-    SCAN("Gate", Icons.Rounded.QrCodeScanner),
-    // §6.1 — warehouse mode sits beside the existing gate flow rather than
-    // replacing it; an officer moves between both in one shift.
-    WAREHOUSE("Warehouse", Icons.Rounded.Inventory2),
-    RECORDS("Records", Icons.Rounded.History),
-    SETTINGS("Settings", Icons.Rounded.Settings),
+    // Demo build: exactly two modes, no login, no setup.
+    // Send creates signed QRs locally; Receive scans them. Same phone works.
+    SEND("Send", Icons.Rounded.Send),
+    RECEIVE("Receive", Icons.Rounded.CallReceived),
 }
 
 private sealed interface Page {
-    /** Warehouse mode (§6.1): pick a shipment, scan it, reconcile the load. */
+    /** Receive mode: pick a shipment, scan it, see what's missing. */
     data class WarehouseScan(val ref: String, val receiving: Boolean) : Page
     data class WarehouseRecon(val ref: String) : Page
-    data object DeviceSetup : Page
-    data object ManifestStep : Page
-    data object CargoScan : Page
-    data object ResultActive : Page
-    data class ResultView(val recordId: String) : Page
-    data object NpuModel : Page
-    data object Chat : Page
 }
 
 private sealed interface NavTarget {
@@ -110,15 +79,10 @@ private sealed interface NavTarget {
 
 @Composable
 fun AppRoot() {
-    val now = remember { System.currentTimeMillis() }
-    var tab by remember { mutableStateOf(Tab.HOME) }
+    var tab by remember { mutableStateOf(Tab.SEND) }
     val stack = remember { mutableStateListOf<Page>() }
-    val flow = remember { InspectionFlowState() }
     val settings = remember { AppSettings() }
-    // Survives navigation so the transcript is still there on the way back.
-    val chat = remember { com.veritransit.inspector.ai.ChatSession() }
     var toast by remember { mutableStateOf<String?>(null) }
-    var startInManualFlag by remember { mutableStateOf(false) }
 
     val warehouse: WarehouseViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
 
@@ -138,8 +102,8 @@ fun AppRoot() {
     val navTarget: NavTarget = if (stack.isEmpty()) NavTarget.TabT(tab) else NavTarget.PageT(stack.last())
     val showBar = stack.isEmpty()
 
-    BackHandler(enabled = stack.isNotEmpty() || tab != Tab.HOME) {
-        if (stack.isNotEmpty()) stack.removeAt(stack.lastIndex) else tab = Tab.HOME
+    BackHandler(enabled = stack.isNotEmpty() || tab != Tab.SEND) {
+        if (stack.isNotEmpty()) stack.removeAt(stack.lastIndex) else tab = Tab.SEND
     }
 
     androidx.compose.runtime.CompositionLocalProvider(
@@ -165,45 +129,12 @@ fun AppRoot() {
             ) { target ->
                 when (target) {
                     is NavTarget.TabT -> when (target.tab) {
-                        Tab.HOME -> HomeScreen(
-                            now = now,
-                            onStartInspection = {
-                                flow.startNew(false)
-                                startInManualFlag = false
-                                gotoTab(Tab.SCAN)
-                            },
-                            onLookup = {
-                                flow.startNew(true)
-                                startInManualFlag = true
-                                gotoTab(Tab.SCAN)
-                            },
-                            onOpenRecord = { id -> stack.add(Page.ResultView(id)) },
-                            onOpenShiftLogs = { gotoTab(Tab.RECORDS) },
+                        Tab.SEND -> com.veritransit.inspector.ui.screens.SenderScreen(
+                            onToast = { feedback(it) },
                         )
-                        Tab.SCAN -> ScanScreen(
-                            flow = flow,
-                            startInManual = startInManualFlag,
-                            onDetected = {
-                                if (flow.manifest == null) flow.manifest = InspectionFlowState.defaultManifest()
-                            },
-                            onContinue = { stack.add(Page.ManifestStep) },
-                            onBack = { gotoTab(Tab.HOME) },
-                            feedback = { msg -> feedback(msg, beep = true) },
-                        )
-                        Tab.WAREHOUSE -> ShipmentListScreen(
+                        Tab.RECEIVE -> ShipmentListScreen(
                             vm = warehouse,
-                            onOpen = { ref -> stack.add(Page.WarehouseScan(ref, receiving = false)) },
-                            onSetup = { stack.add(Page.DeviceSetup) },
-                        )
-                        Tab.RECORDS -> RecordsScreen(
-                            now = now,
-                            onOpenRecord = { id -> stack.add(Page.ResultView(id)) },
-                            onToast = { feedback(it) },
-                        )
-                        Tab.SETTINGS -> SettingsScreen(
-                            settings = settings,
-                            onToast = { feedback(it) },
-                            onOpenNpu = { stack.add(Page.NpuModel) },
+                            onOpen = { ref -> stack.add(Page.WarehouseScan(ref, receiving = true)) },
                         )
                     }
                     is NavTarget.PageT -> when (val page = target.page) {
@@ -220,79 +151,6 @@ fun AppRoot() {
                             vm = warehouse,
                             onBack = { stack.removeAt(stack.lastIndex) },
                         )
-                        Page.DeviceSetup -> DeviceSetupPanel(
-                            onSynced = { feedback("Shift data cached — scanning works offline now", beep = true) },
-                        )
-                        Page.NpuModel -> NpuScreen(
-                            onBack = { stack.removeAt(stack.lastIndex) },
-                            onToast = { feedback(it) },
-                            onOpenChat = { stack.add(Page.Chat) },
-                        )
-                        Page.Chat -> ChatScreen(
-                            session = chat,
-                            onBack = { stack.removeAt(stack.lastIndex) },
-                        )
-                        Page.ManifestStep -> ManifestScreen(
-                            flow = flow,
-                            onToggleSeal = { flow.sealOk = !flow.sealOk },
-                            onToggleDriver = { flow.driverOk = !flow.driverOk },
-                            onStartScan = {
-                                flow.resetForScan()
-                                stack.add(Page.CargoScan)
-                            },
-                            onBack = { stack.removeAt(stack.lastIndex) },
-                        )
-                        Page.CargoScan -> CargoScanScreen(
-                            flow = flow,
-                            onScanComplete = {
-                                if (flow.confidence() == 0f) flow.setConfidence(flow.aiConfidence)
-                                stack.add(Page.ResultActive)
-                            },
-                            onBack = { stack.removeAt(stack.lastIndex) },
-                        )
-                        Page.ResultActive -> {
-                            val draft = flow.draftRecord(now)
-                            ResultScreen(
-                                record = draft,
-                                flow = flow,
-                                onConfirm = { action, note ->
-                                    val final = draft.copy(
-                                        verdict = if (action == OfficerAction.CLEAR) Verdict.PASSED else Verdict.REVIEW,
-                                        note = note,
-                                    )
-                                    Repo.commit(final)
-                                    feedback("Record ${final.id} committed to vault", beep = true)
-                                    gotoTab(Tab.HOME)
-                                },
-                                onRescan = {
-                                    flow.resetForScan()
-                                    stack.removeAt(stack.lastIndex)
-                                },
-                                onPrint = { feedback("Summary queued for field printer") },
-                                onIssueNotice = null,
-                                onBack = { stack.removeAt(stack.lastIndex) },
-                            )
-                        }
-                        is Page.ResultView -> {
-                            val record = Repo.records.firstOrNull { it.id == page.recordId }
-                            if (record == null) {
-                                Box(Modifier.fillMaxSize())
-                            } else {
-                                ResultScreen(
-                                    record = record,
-                                    flow = null,
-                                    onConfirm = { _, _ -> },
-                                    onRescan = null,
-                                    onPrint = { feedback("Summary queued for field printer") },
-                                    onIssueNotice = {
-                                        val idx = Repo.records.indexOfFirst { it.id == record.id }
-                                        if (idx >= 0) Repo.records[idx] = record.copy(noticeIssued = true)
-                                        feedback("Notice MOV-04 issued & logged")
-                                    },
-                                    onBack = { stack.removeAt(stack.lastIndex) },
-                                )
-                            }
-                        }
                     }
                 }
             }
@@ -304,7 +162,6 @@ fun AppRoot() {
                 modifier = Modifier.align(Alignment.BottomCenter),
                 onSelect = { t ->
                     if (t != tab) {
-                        startInManualFlag = false
                         gotoTab(t)
                     }
                 },

@@ -105,6 +105,34 @@ data class CreateShipmentRequest(
     @SerialName("po_no") val poNo: String? = null,
 )
 
+/**
+ * The demo shortcut — one call that does what a pack station does in three:
+ * creates the shipment, issues one signed label per carton, attaches the PO
+ * and invoice paperwork (so finance terms exist), and returns the label
+ * payloads ready to be rendered as QR codes.
+ */
+@Serializable
+data class QuickShipRequest(
+    val supplier: String,
+    val buyer: String,
+    /** What is in the cartons — becomes the line description and label contents. */
+    val item: String,
+    /** Number of top-level cartons; each gets its own signed label. */
+    val cartons: Int,
+    /** Order value per carton; the shipment's order value is cartons × this. */
+    val rate: Double,
+    val vehicle: String? = null,
+    @SerialName("origin_site") val originSite: String? = null,
+    @SerialName("dest_site") val destSite: String? = null,
+)
+
+@Serializable
+data class QuickShipResponse(
+    val ref: String,
+    val labels: List<IssuedLabel>,
+    @SerialName("order_value") val orderValue: Double,
+)
+
 @Serializable
 data class IssueLabelsRequest(
     val lines: List<LabelLine>,

@@ -101,6 +101,9 @@ dependencies {
     // Real scanning (§6.1): ML Kit decodes QR + Code128 from one frame, on-device.
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
 
+    // QR *rendering* for the sender side — encode only, no scanning (ML Kit reads).
+    implementation("com.google.zxing:core:3.5.3")
+
     // Ed25519 verification. Platform Ed25519 is API 33+, and minSdk here is 31,
     // so Tink carries it on the devices that would otherwise be excluded.
     implementation("com.google.crypto.tink:tink-android:1.13.0")

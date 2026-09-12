@@ -59,6 +59,14 @@ export const api = {
   report: (ref: string) => req<ShipmentReport>(`/v1/shipments/${ref}/report`),
   packages: (ref: string) => req<PackageRecord[]>(`/v1/shipments/${ref}/packages`),
   documents: (ref: string) => req<ShipmentDocument[]>(`/v1/shipments/${ref}/documents`),
+  addDocument: (ref: string, doc: Record<string, unknown>) =>
+    // A document whose numbers drive money must carry the human who confirmed
+    // them on screen — the server records this as `confirmed_by` (§12 rail).
+    req<ShipmentDocument>(`/v1/shipments/${ref}/documents`, {
+      method: 'POST',
+      body: JSON.stringify(doc),
+      headers: { 'X-Confirmed-By': auth.user() ?? 'web-console' },
+    }),
   reconciliation: (ref: string) => req<ReconciliationRun>(`/v1/shipments/${ref}/reconciliation`),
   reconcile: (ref: string) =>
     req<ReconciliationRun>(`/v1/shipments/${ref}/reconcile`, { method: 'POST' }),
@@ -108,6 +116,12 @@ export const api = {
     req<ScanEvent[]>(`/v1/scans?limit=${limit}${ref ? `&shipment=${ref}` : ''}`),
 
   pod: (ref: string) => req<PodCertificate[]>(`/v1/shipments/${ref}/pod`),
+  podSubmit: (ref: string, body: {
+    receiver_name: string; delivered_at: string; signature_uri?: string; lat?: number; lng?: number
+  }) =>
+    req<PodCertificate>(`/v1/shipments/${ref}/pod`, {
+      method: 'POST', body: JSON.stringify({ shipment_ref: ref, ...body }),
+    }),
   podRender: async (id: string) => {
     const res = await fetch(`/v1/pod/${id}/render`)
     return res.text()
@@ -122,8 +136,8 @@ export const api = {
     req<AuditEntry[]>(`/v1/audit?${from ? `from=${from}&` : ''}${to ? `to=${to}` : ''}`),
   auditVerify: () => req<AuditChainStatus>('/v1/audit/verify'),
 
-  setStatus: (ref: string, to: string, override = false) =>
-    req<Shipment>(`/v1/shipments/${ref}/status?to=${to}${override ? '&override=true' : ''}`,
+  setStatus: (ref: string, to: string, override = false, reason?: string) =>
+    req<Shipment>(`/v1/shipments/${ref}/status?to=${to}${override ? '&override=true' : ''}${reason ? `&reason=${encodeURIComponent(reason)}` : ''}`,
       { method: 'POST' }),
 }
 

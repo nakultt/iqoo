@@ -35,11 +35,8 @@ import com.veritransit.inspector.scan.VerificationEngine
 import java.util.concurrent.Executors
 
 /**
- * §6.1 warehouse screens.
- *
- * The design language of the existing inspection flow is reused on purpose —
- * verdict colour, haptics, motion — because an officer moves between gate and
- * warehouse mode in one shift and a second visual grammar would cost accuracy.
+ * Demo receive screens: two taps to a verdict, no login, no server.
+ * Same phone that sent the QRs verifies them offline.
  */
 
 // ------------------------------------------------------------- shipment list
@@ -48,27 +45,15 @@ import java.util.concurrent.Executors
 fun ShipmentListScreen(
     vm: WarehouseViewModel,
     onOpen: (String) -> Unit,
-    onSetup: () -> Unit,
 ) {
     val shipments by vm.shipments.collectAsState()
-    val outbox by vm.outboxDepth.collectAsState()
-    val syncing by vm.syncing.collectAsState()
 
     Column(Modifier.fillMaxSize().statusBarsPadding().padding(16.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Today's dispatches", style = MaterialTheme.typography.headlineSmall,
-                modifier = Modifier.weight(1f))
-            if (outbox > 0) {
-                AssistChip(onClick = { vm.sync() }, enabled = !syncing,
-                    label = { Text(if (syncing) "Syncing…" else "$outbox queued") })
-                Spacer(Modifier.width(6.dp))
-            }
-            AssistChip(onClick = onSetup, label = { Text("Setup") })
-        }
+        Text("Receive", style = MaterialTheme.typography.headlineSmall,
+            modifier = Modifier.fillMaxWidth())
         Spacer(Modifier.height(4.dp))
         Text(
-            "Scans are recorded on this phone first. The queue above is what has not " +
-                "reached the server yet — nothing is lost while it waits.",
+            "Step 2 of 2 — pick a shipment, scan its QRs. Works offline.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -77,12 +62,10 @@ fun ShipmentListScreen(
         if (shipments.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("No shipments cached", style = MaterialTheme.typography.titleMedium)
+                    Text("Nothing to receive yet", style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.height(6.dp))
-                    Text("Connect to the server in Settings and sync before the shift.",
+                    Text("Go to Send and tap Create & show QRs first.",
                         style = MaterialTheme.typography.bodySmall)
-                    Spacer(Modifier.height(12.dp))
-                    Button(onClick = onSetup) { Text("Set up this device") }
                 }
             }
         } else {
@@ -90,23 +73,14 @@ fun ShipmentListScreen(
                 items(shipments, key = { it.ref }) { s ->
                     ElevatedCard(onClick = { vm.select(s.ref); onOpen(s.ref) }) {
                         Column(Modifier.padding(14.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(s.ref, fontFamily = FontFamily.Monospace,
-                                    fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                                s.riskBand?.let { RiskBadge(it, s.riskScore) }
-                            }
+                            Text(s.ref, fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold)
                             Spacer(Modifier.height(4.dp))
                             Text("${s.supplier ?: "—"} → ${s.buyer ?: "—"}",
                                 style = MaterialTheme.typography.bodySmall)
-                            Text("${s.vehicle ?: "no vehicle"} · ${s.expectedCount} cartons",
+                            Text("${s.expectedCount} cartons — tap to scan",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            // §6.1 — the finance chip travels with the shipment, so a
-                            // loader can see a held payment without leaving the dock.
-                            s.financeStatus?.let { fin ->
-                                Spacer(Modifier.height(6.dp))
-                                FinanceChip(fin, s.heldValue)
-                            }
                         }
                     }
                 }
@@ -115,39 +89,11 @@ fun ShipmentListScreen(
     }
 }
 
-@Composable
-private fun RiskBadge(band: String, score: Int?) {
-    val color = when (band) {
-        "HIGH" -> Color(0xFFC5341F); "MEDIUM" -> Color(0xFFB7791F); else -> Color(0xFF0F8A4D)
-    }
-    Surface(color = color.copy(alpha = 0.14f), shape = RoundedCornerShape(999.dp)) {
-        Text("${score ?: ""} $band".trim(), color = color, fontWeight = FontWeight.SemiBold,
-            style = MaterialTheme.typography.labelSmall,
-            modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp))
-    }
-}
-
-@Composable
-private fun FinanceChip(status: String, held: Double?) {
-    val color = when (status) {
-        "HELD" -> Color(0xFF7C3AED); "RELEASED" -> Color(0xFF0F8A4D); else -> Color(0xFF626873)
-    }
-    Surface(color = color.copy(alpha = 0.14f), shape = RoundedCornerShape(6.dp)) {
-        Text(
-            if (status == "HELD" && held != null && held > 0)
-                "PAYMENT HELD ₹${"%,.0f".format(held)}" else status,
-            color = color, fontWeight = FontWeight.SemiBold,
-            style = MaterialTheme.typography.labelSmall,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-        )
-    }
-}
-
 // ------------------------------------------------------------- package scan
 
 /**
- * §7.1 hot path. The viewfinder decodes QR and Code128 from the same frame and
- * the verdict card answers before the officer lowers the phone.
+ * Scan hot path: point camera at the sender's QR, or tap Simulate scan
+ * when both sides share one phone. Verdict is instant and offline.
  */
 @Composable
 fun PackageScanScreen(vm: WarehouseViewModel, kind: ScanKind, onDone: () -> Unit) {
@@ -191,12 +137,18 @@ fun PackageScanScreen(vm: WarehouseViewModel, kind: ScanKind, onDone: () -> Unit
             }
         }
 
+        // The verdict card owns the bottom strip while it is up — its own Next
+        // dismisses it and these controls come back.
         verdict?.let { VerdictCard(it, Modifier.align(Alignment.BottomCenter)) { vm.clearVerdict() } }
-
-        FilledTonalButton(
-            onClick = onDone,
-            modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
-        ) { Text("Done") }
+            ?: Column(
+                Modifier.align(Alignment.BottomStart).padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                // One-phone demo: the sender's QRs are on this screen, so
+                // there is no second camera — this runs the same verdict path.
+                FilledTonalButton(onClick = { vm.simulateScan(kind) }) { Text("Tap to scan next carton") }
+                FilledTonalButton(onClick = onDone) { Text("Done — see result") }
+            }
     }
 }
 
@@ -288,19 +240,19 @@ private fun VerdictCard(
     }
 }
 
-// ------------------------------------------------------- load reconciliation
+// ------------------------------------------------------- reconciliation (result)
 
-/** §7.3 — the release gate. Dispatch is blocked while anything is unaccounted. */
+/** Final screen: how many cartons verified, what's missing. That's the demo. */
 @Composable
 fun LoadReconciliationScreen(vm: WarehouseViewModel, onBack: () -> Unit) {
     val (done, total) = vm.accounted.collectAsState().value
     val missing by vm.missing.collectAsState()
-    val outbox by vm.outboxDepth.collectAsState()
 
     LaunchedEffect(Unit) { vm.refreshCounts() }
 
     Column(Modifier.fillMaxSize().statusBarsPadding().padding(16.dp)) {
-        Text("Load reconciliation", style = MaterialTheme.typography.headlineSmall)
+        Text(if (missing.isEmpty()) "Delivered ✓" else "Receiving…",
+            style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(12.dp))
 
         Surface(
@@ -310,20 +262,14 @@ fun LoadReconciliationScreen(vm: WarehouseViewModel, onBack: () -> Unit) {
             modifier = Modifier.fillMaxWidth(),
         ) {
             Column(Modifier.padding(16.dp)) {
-                Text("$done of $total cartons accounted",
+                Text("$done of $total cartons verified",
                     style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    if (missing.isEmpty()) "Complete — the truck can be released."
-                    else "${missing.size} not yet scanned. Dispatch is blocked until every line is accounted for.",
+                    if (missing.isEmpty()) "All cartons match — demo complete."
+                    else "${missing.size} still to scan. Go back and keep scanning.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
-                if (outbox > 0) {
-                    Spacer(Modifier.height(6.dp))
-                    Text("$outbox scans still queued for sync — the count above is this device's view.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
             }
         }
 
@@ -357,9 +303,6 @@ fun LoadReconciliationScreen(vm: WarehouseViewModel, onBack: () -> Unit) {
         }
 
         Spacer(Modifier.weight(1f))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = onBack, modifier = Modifier.weight(1f)) { Text("Back") }
-            Button(onClick = { vm.sync() }, modifier = Modifier.weight(1f)) { Text("Sync") }
-        }
+        OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("Back to scanning") }
     }
 }

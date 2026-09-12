@@ -35,6 +35,9 @@ data class HoldRequest(val amount: Double, val reason: String)
 @Serializable
 data class ResolveRequest(val note: String)
 
+/** Terms attached when paperwork first lands — the documents flow and quick-ship share them. */
+private val DEMO_FINANCE_TERMS = mapOf("on_verified_delivery_pct" to "70", "balance" to "net_30")
+
 /** The §8.3 surface. */
 fun Application.apiRoutes(s: Services) {
 
@@ -110,6 +113,84 @@ fun Application.apiRoutes(s: Services) {
             post("/shipments") {
                 val req = call.receive<CreateShipmentRequest>()
                 call.respond(HttpStatusCode.Created, s.shipments.create(req, call.actor(s.sessions)))
+            }
+
+            /**
+             * The demo shortcut — everything a pack station does in three calls,
+             * collapsed into one: shipment, signed labels, paperwork and finance
+             * terms. It composes the same services, so the audit chain and the
+             * signature story are identical to the long path.
+             */
+            post("/quick-ship") {
+                val principal = call.principal(s.sessions)
+                    ?: return@post call.respond(
+                        HttpStatusCode.Unauthorized,
+                        ApiError("unauthorized", "activate this device, or sign in"),
+                    )
+                val req = call.receive<QuickShipRequest>()
+                require(req.cartons in 1..500) { "cartons must be between 1 and 500" }
+                require(req.rate.isFinite() && req.rate >= 0) { "rate must be a non-negative number" }
+                val actor = call.actor(s.sessions)
+                val shipment = s.shipments.create(
+                    CreateShipmentRequest(
+                        vehicle = req.vehicle, originSite = req.originSite, destSite = req.destSite,
+                        supplier = req.supplier, buyer = req.buyer,
+                    ),
+                    actor,
+                )
+                // Demo-grade fault handling: the services commit independently, so a
+                // failure past this point would strand an orphan shipment. The 500
+                // names it and the audit chain records it, rather than leaving a
+                // silent half-shipment nobody can reconcile.
+                try {
+                    val labels = s.labels.issueBatch(
+                        shipment.ref,
+                        IssueLabelsRequest(listOf(LabelLine(
+                            poLineNo = 1,
+                            sku = req.item.uppercase().replace(Regex("[^A-Z0-9]+"), "-").trim('-').take(24)
+                                .ifEmpty { "ITEM" },
+                            contents = req.item,
+                            masters = req.cartons,
+                        ))),
+                        actor,
+                    )
+                    // Paperwork is what creates the money path (§5.1): a PO and its
+                    // invoice for the same value, so the four-way match has an anchor.
+                    val total = req.cartons * req.rate
+                    for (kind in listOf(DocumentKind.PO, DocumentKind.INVOICE)) {
+                        s.documents.attach(
+                            shipment.ref,
+                            ShipmentDocument(
+                                shipmentRef = shipment.ref, kind = kind,
+                                docNo = "${kind.name}-${shipment.ref}",
+                                docDate = java.time.LocalDate.now().toString(),
+                                fact = DocumentFact(
+                                    kind = kind, docNo = "${kind.name}-${shipment.ref}",
+                                    seller = PartyRef(name = req.supplier), buyer = PartyRef(name = req.buyer),
+                                    lines = listOf(DocumentLine(
+                                        lineNo = 1, description = req.item, qty = req.cartons.toDouble(),
+                                        rate = req.rate, amount = total,
+                                    )),
+                                    totals = DocumentTotals(taxableValue = total, grandTotal = total),
+                                ),
+                                readBy = DocumentReader.MANUAL,
+                            ),
+                            uploadedBy = actor, confirmedBy = actor,
+                        )
+                    }
+                    s.finance.ensureTerms(shipment.ref, total, DEMO_FINANCE_TERMS)
+                    s.risk.recomputeAndStore(shipment.ref)
+                    s.audit.append(actor, "QUICK_SHIP", shipment.ref,
+                        buildJsonObject { put("cartons", req.cartons); put("order_value", total) })
+                    call.respond(HttpStatusCode.Created, QuickShipResponse(shipment.ref, labels.labels, total))
+                } catch (e: Exception) {
+                    s.audit.append(actor, "QUICK_SHIP_FAILED", shipment.ref,
+                        buildJsonObject { put("error", e.message ?: "unknown") })
+                    call.respond(HttpStatusCode.InternalServerError, ApiError(
+                        "quick-ship partially failed",
+                        "shipment ${shipment.ref} was created but later steps failed: ${e.message}",
+                    ))
+                }
             }
 
             get("/shipments/{ref}") {
@@ -197,7 +278,7 @@ fun Application.apiRoutes(s: Services) {
                     // Attaching paperwork changes the answer, so the match and the
                     // finance state are recomputed rather than left stale.
                     s.documents.orderValue(ref)?.let {
-                        s.finance.ensureTerms(ref, it, mapOf("on_verified_delivery_pct" to "70", "balance" to "net_30"))
+                        s.finance.ensureTerms(ref, it, DEMO_FINANCE_TERMS)
                     }
                     call.respond(HttpStatusCode.Created, stored)
                 } catch (e: DocumentService.DuplicateDocument) {

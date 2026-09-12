@@ -2,18 +2,23 @@ package com.veritransit.inspector.data
 
 import android.content.Context
 import com.veritransit.core.PodSubmission
+import com.veritransit.core.QuickShipRequest
+import com.veritransit.core.QuickShipResponse
 import com.veritransit.core.ReasonCode
 import com.veritransit.core.ScanEvent
 import com.veritransit.core.ScanKind
 import com.veritransit.core.ScanResult
 import com.veritransit.inspector.crypto.LabelVerifier
+import com.veritransit.inspector.crypto.LocalLabelIssuer
 import com.veritransit.inspector.data.local.*
 import com.veritransit.inspector.net.ApiClient
 import com.veritransit.inspector.scan.VerificationEngine
+import android.util.Base64
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.security.SecureRandom
 import java.time.Instant
 import java.util.UUID
 
@@ -28,6 +33,7 @@ import java.util.UUID
 class VeriTransitRepo private constructor(
     private val db: VeriTransitDatabase,
     private val settings: DeviceSettings,
+    private val appContext: Context,
 ) {
     private val json = Json { ignoreUnknownKeys = true; isLenient = true; encodeDefaults = true }
 
@@ -104,6 +110,120 @@ class VeriTransitRepo private constructor(
 
     suspend fun savePodDraft(draft: PodDraftEntity) = db.pod().save(draft)
     suspend fun podDraft(ref: String) = db.pod().draft(ref)
+
+    // ------------------------------------------------------------- quick send
+
+    /** Result of the one-tap send: a shipment ref and one QR payload per carton. */
+    data class QuickSend(val ref: String, val payloads: List<String>)
+
+    private val random = SecureRandom()
+
+    private fun randomRef(): String {
+        val alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+        return "SHP-QS-" + (1..6).map { alphabet[random.nextInt(alphabet.length)] }.joinToString("")
+    }
+
+    /**
+     * The sender's one tap. Server-first: when this phone is enrolled, the
+     * server creates the shipment and signs the labels there, so both phones
+     * agree through the bootstrap. With no server the same shape is created
+     * locally and signed with the on-device key — the demo never blocks.
+     */
+    suspend fun sendQuickShipment(
+        supplier: String, buyer: String, item: String, cartons: Int, rate: Double,
+        vehicle: String?, origin: String?, dest: String?,
+    ): QuickSend {
+        if (settings.serverUrl != null) {
+            val client = api()
+            if (client != null) {
+                try {
+                    val res = client.quickShip(
+                        QuickShipRequest(supplier, buyer, item, cartons, rate, vehicle, origin, dest)
+                    )
+                    // Outside the fallback: if the server answered but mirroring
+                    // failed, surface it rather than minting a second shipment.
+                    storeQuickSend(res, supplier, buyer, vehicle, origin, dest)
+                    return QuickSend(res.ref, res.labels.map { it.payload })
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Throwable) {
+                    // Server unreachable — fall through to the local path.
+                } finally {
+                    client.close()
+                }
+            }
+        }
+        return sendQuickShipmentLocal(supplier, buyer, item, cartons, rate, vehicle, origin, dest)
+    }
+
+    private suspend fun sendQuickShipmentLocal(
+        supplier: String, buyer: String, item: String, cartons: Int, rate: Double,
+        vehicle: String?, origin: String?, dest: String?,
+    ): QuickSend {
+        val issuer = LocalLabelIssuer(appContext)
+        val ref = randomRef()
+        val now = System.currentTimeMillis()
+        val payloads = mutableListOf<String>()
+        val packages = mutableListOf<PackageEntity>()
+
+        repeat(cartons) {
+            val code = "VT-P-" + UUID.randomUUID().toString().substring(0, 8).uppercase()
+            val token = issuer.issue(code, ref)
+            payloads += token.toString()
+            packages += PackageEntity(
+                packageCode = code, shipmentRef = ref, kind = "UNIT", parentCode = null,
+                contents = item, sku = null, qty = 1, poLineNo = 1,
+                status = "PRINTED", labelPayload = token.toString(), copyNo = 1, localStatus = null,
+            )
+        }
+
+        db.packages().upsert(packages)
+        db.shipments().upsert(listOf(ShipmentEntity(
+            ref = ref, vehicle = vehicle, origin = origin, destination = dest,
+            expectedCount = cartons, status = "DISPATCHED",
+            supplier = supplier, buyer = buyer,
+            riskScore = null, riskBand = null, financeStatus = "AWAITING",
+            // Nothing is actually held on the local path — the chip would lie.
+            heldValue = null,
+            cachedAt = now,
+        )))
+        // Pin the local public key so the receiver on this phone verifies these
+        // labels the same way it verifies server-signed ones. URL-safe, unpadded:
+        // that is the alphabet LabelVerifier decodes with.
+        db.keys().upsert(listOf(KeyConfigEntity(
+            issuer.keypair.keyId, "Ed25519",
+            Base64.encodeToString(
+                issuer.keypair.publicKey,
+                Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING,
+            ),
+            now,
+        )))
+        return QuickSend(ref, payloads)
+    }
+
+    /** Mirrors a server-created quick-ship into Room so receiving works offline. */
+    private suspend fun storeQuickSend(
+        res: QuickShipResponse, supplier: String, buyer: String,
+        vehicle: String?, origin: String?, dest: String?,
+    ) {
+        val now = System.currentTimeMillis()
+        db.shipments().upsert(listOf(ShipmentEntity(
+            ref = res.ref, vehicle = vehicle, origin = origin, destination = dest,
+            expectedCount = res.labels.size, status = "DISPATCHED",
+            supplier = supplier, buyer = buyer,
+            riskScore = null, riskBand = null, financeStatus = "AWAITING",
+            heldValue = null, cachedAt = now,
+        )))
+        db.packages().upsert(res.labels.map { l ->
+            PackageEntity(
+                packageCode = l.packageCode, shipmentRef = res.ref, kind = l.kind.name,
+                parentCode = l.parentCode, contents = l.contents, sku = null, qty = l.qty,
+                poLineNo = 1, status = "PRINTED", labelPayload = l.payload, copyNo = 1,
+                localStatus = null,
+            )
+        })
+        refreshBootstrap()
+    }
 
     // ------------------------------------------------------------- sync
 
@@ -260,6 +380,7 @@ class VeriTransitRepo private constructor(
             instance ?: VeriTransitRepo(
                 VeriTransitDatabase.get(context),
                 DeviceSettings(context),
+                context.applicationContext,
             ).also { instance = it }
         }
     }

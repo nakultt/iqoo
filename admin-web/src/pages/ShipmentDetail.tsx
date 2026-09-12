@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, inr, when } from '../api'
+import { ApiError, api, inr, when } from '../api'
 import { Empty, ErrorBox, FinancePill, Loading, Pill, Ring, RiskPill, StatusPill } from '../components/Bits'
 import type { MatchLine, ShipmentReport } from '../types'
 
@@ -16,6 +16,7 @@ type Tab = 'overview' | 'match' | 'documents' | 'packages' | 'finance' | 'scans'
 export default function ShipmentDetail() {
   const { ref = '' } = useParams()
   const [tab, setTab] = useState<Tab>('overview')
+  const [note, setNote] = useState<{ tone: string; text: string } | null>(null)
   const qc = useQueryClient()
 
   const report = useQuery({ queryKey: ['report', ref], queryFn: () => api.report(ref) })
@@ -58,6 +59,7 @@ export default function ShipmentDetail() {
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <StatusPill status={s.status} />
+          <StatusActions refName={ref} status={s.status} onNote={setNote} />
           <button className="small" onClick={() => reconcile.mutate()} disabled={reconcile.isPending}>
             {reconcile.isPending ? 'Matching…' : 'Re-run four-way match'}
           </button>
@@ -66,6 +68,8 @@ export default function ShipmentDetail() {
           </button>
         </div>
       </div>
+
+      {note && <div className={`banner ${note.tone}`}>{note.text}</div>}
 
       {r.finance?.status === 'HELD' && (
         <div className="banner held">
@@ -127,6 +131,70 @@ export default function ShipmentDetail() {
       {tab === 'finance' && <Finance refName={ref} />}
       {tab === 'scans' && <Scans refName={ref} />}
       {tab === 'pod' && <Pod refName={ref} />}
+    </>
+  )
+}
+
+/**
+ * The sender's physical gate: OPEN → LOADING → DISPATCHED. Dispatch is
+ * completeness-gated server-side; on a 409 the operator is offered the explicit,
+ * audit-chained override with a reason, never a silent pass.
+ */
+function StatusActions({ refName, status, onNote }: {
+  refName: string
+  status: string
+  onNote: (n: { tone: string; text: string } | null) => void
+}) {
+  const qc = useQueryClient()
+  const setStatus = useMutation({
+    mutationFn: (v: { to: string; override?: boolean; reason?: string }) =>
+      api.setStatus(refName, v.to, v.override ?? false, v.reason),
+    onSuccess: (s) => {
+      qc.invalidateQueries({ queryKey: ['report', refName] })
+      qc.invalidateQueries({ queryKey: ['shipments'] })
+      onNote({ tone: 'ok', text: `${refName} is now ${s.status}.` })
+    },
+    onError: (e) => onNote({ tone: 'bad', text: (e as Error).message }),
+  })
+
+  const dispatch = async () => {
+    onNote(null)
+    try {
+      await setStatus.mutateAsync({ to: 'DISPATCHED' })
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        const reason = prompt(
+          `Dispatch gate refused — ${e.detail ?? 'shipment is not complete'}\n` +
+          'Dispatch anyway? Enter an override reason (audit-chained):')
+        if (!reason) return
+        // The override itself can still fail (session expired, network); it
+        // must not escape unhandled after the operator typed an audit reason.
+        try {
+          await setStatus.mutateAsync({ to: 'DISPATCHED', override: true, reason })
+        } catch (e2) {
+          onNote({ tone: 'bad', text: (e2 as Error).message })
+        }
+      } else {
+        onNote({ tone: 'bad', text: (e as Error).message })
+      }
+    }
+  }
+
+  if (status === 'RECEIVED' || status === 'FLAGGED' || status === 'DISPATCHED') return null
+  return (
+    <>
+      {status === 'OPEN' && (
+        <button className="small" disabled={setStatus.isPending}
+          onClick={() => {
+            onNote(null)
+            setStatus.mutate({ to: 'LOADING' })
+          }}>
+          {setStatus.isPending ? 'Saving…' : 'Start loading'}
+        </button>
+      )}
+      <button className="small primary" disabled={setStatus.isPending} onClick={dispatch}>
+        {setStatus.isPending ? 'Saving…' : 'Mark dispatched'}
+      </button>
     </>
   )
 }
@@ -282,43 +350,205 @@ function Match({ recon }: { recon: Awaited<ReturnType<typeof api.reconciliation>
 
 function Documents({ refName }: { refName: string }) {
   const { data, isLoading } = useQuery({ queryKey: ['docs', refName], queryFn: () => api.documents(refName) })
+  const [adding, setAdding] = useState(false)
   if (isLoading) return <Loading />
-  if (!data?.length) return <Empty>No documents attached.</Empty>
   return (
-    <div className="grid two">
-      {data.map((d) => (
-        <div className="card" key={d.id ?? d.doc_no}>
-          <h2>{d.kind} · <span className="mono">{d.doc_no}</span></h2>
-          <p className="sub">
-            {d.doc_date} · {d.fact.seller.name} → {d.fact.buyer.name}
-            {' · '}read by {d.read_by}{d.confidence ? ` (${(d.confidence * 100).toFixed(1)}% confident)` : ''}
-          </p>
-          <table>
-            <thead>
-              <tr><th>#</th><th>Description</th><th className="num">Qty</th>
-                <th className="num">Rate</th><th className="num">Amount</th></tr>
-            </thead>
-            <tbody>
-              {d.fact.lines.map((l) => (
-                <tr key={l.line_no}>
-                  <td>{l.line_no}</td>
-                  <td><div className="tiny">{l.description}</div>
-                    <div className="tiny muted mono">{l.sku} · HSN {l.hsn}</div></td>
-                  <td className="num">{l.qty}</td>
-                  <td className="num">{inr(l.rate)}</td>
-                  <td className="num">{inr(l.amount)}</td>
-                </tr>
-              ))}
-            </tbody>
-            <tfoot>
-              <tr style={{ fontWeight: 700 }}>
-                <td colSpan={4}>Taxable value</td>
-                <td className="num">{inr(d.fact.totals.taxable_value)}</td>
-              </tr>
-            </tfoot>
-          </table>
+    <>
+      <div className="toolbar">
+        <button className={adding ? '' : 'primary'} onClick={() => setAdding((v) => !v)}>
+          {adding ? 'Cancel' : '+ Attach document'}
+        </button>
+        <span className="tiny muted">Attaching the PO or invoice is what creates the finance terms —
+           no paperwork, no money path.</span>
+      </div>
+      {adding && <DocumentForm refName={refName} onDone={() => setAdding(false)} />}
+      {!data?.length ? (
+        <Empty>No documents attached.</Empty>
+      ) : (
+        <div className="grid two">
+          {data.map((d) => (
+            <div className="card" key={d.id ?? d.doc_no}>
+              <h2>{d.kind} · <span className="mono">{d.doc_no}</span></h2>
+              <p className="sub">
+                {d.doc_date} · {d.fact.seller.name} → {d.fact.buyer.name}
+                {' · '}read by {d.read_by}{d.confidence ? ` (${(d.confidence * 100).toFixed(1)}% confident)` : ''}
+              </p>
+              <table>
+                <thead>
+                  <tr><th>#</th><th>Description</th><th className="num">Qty</th>
+                    <th className="num">Rate</th><th className="num">Amount</th></tr>
+                </thead>
+                <tbody>
+                  {d.fact.lines.map((l) => (
+                    <tr key={l.line_no}>
+                      <td>{l.line_no}</td>
+                      <td><div className="tiny">{l.description}</div>
+                        <div className="tiny muted mono">{l.sku} · HSN {l.hsn}</div></td>
+                      <td className="num">{l.qty}</td>
+                      <td className="num">{inr(l.rate)}</td>
+                      <td className="num">{inr(l.amount)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr style={{ fontWeight: 700 }}>
+                    <td colSpan={4}>Taxable value</td>
+                    <td className="num">{inr(d.fact.totals.taxable_value)}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  )
+}
+
+/**
+ * Manual document entry — the web twin of the phone's NPU read. Both land in
+ * the same fact model, so the four-way match never learns where a fact came
+ * from. Line amounts are derived (qty × rate); totals derive from the lines.
+ */
+function DocumentForm({ refName, onDone }: { refName: string; onDone: () => void }) {
+  const qc = useQueryClient()
+  const [error, setError] = useState<unknown>(null)
+  const [f, setF] = useState({ kind: 'PO', doc_no: '', doc_date: '', seller: '', seller_gstin: '', buyer: '', buyer_gstin: '', igst: '' })
+  const [lines, setLines] = useState([{ description: '', sku: '', qty: '', unit: 'NOS', rate: '' }])
+
+  const set = (k: keyof typeof f) => (e: { target: { value: string } }) =>
+    setF((v) => ({ ...v, [k]: e.target.value }))
+  const setLine = (i: number, k: string, value: string) =>
+    setLines((ls) => ls.map((l, j) => (j === i ? { ...l, [k]: value } : l)))
+
+  const attach = useMutation({
+    mutationFn: () => {
+      const built = lines
+        .filter((l) => l.description.trim() || l.sku.trim())
+        .map((l, i) => {
+          const qty = Number(l.qty) || 0
+          const rate = Number(l.rate) || 0
+          return {
+            line_no: i + 1,
+            description: l.description || l.sku,
+            sku: l.sku || undefined,
+            qty, unit: l.unit.trim() || 'NOS', rate, amount: qty * rate,
+          }
+        })
+      const taxable = built.reduce((a, l) => a + l.amount, 0)
+      const igst = Number(f.igst) || 0
+      return api.addDocument(refName, {
+        shipment_ref: refName,
+        kind: f.kind,
+        doc_no: f.doc_no.trim(),
+        doc_date: f.doc_date || undefined,
+        fact: {
+          kind: f.kind,
+          doc_no: f.doc_no.trim(),
+          date: f.doc_date || undefined,
+          seller: { name: f.seller.trim(), gstin: f.seller_gstin.trim() || undefined },
+          buyer: { name: f.buyer.trim(), gstin: f.buyer_gstin.trim() || undefined },
+          lines: built,
+          totals: { taxable_value: taxable, igst, grand_total: taxable + igst },
+        },
+        read_by: 'manual',
+      })
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['docs', refName] })
+      qc.invalidateQueries({ queryKey: ['report', refName] })
+      qc.invalidateQueries({ queryKey: ['finance', refName] })
+      qc.invalidateQueries({ queryKey: ['shipments'] })
+      onDone()
+    },
+    onError: (e) => setError(e),
+  })
+
+  return (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <h2>Attach document</h2>
+      {error ? <ErrorBox error={error} /> : null}
+      <div className="row">
+        <div className="field">
+          <label>Kind</label>
+          <select value={f.kind} onChange={set('kind')}>
+            {['PO', 'INVOICE', 'EWB', 'LR', 'PACKING_LIST', 'CHALLAN'].map((k) => <option key={k}>{k}</option>)}
+          </select>
+        </div>
+        <div className="field">
+          <label>Doc number</label>
+          <input value={f.doc_no} onChange={set('doc_no')} placeholder="PO-2026-0142" />
+        </div>
+        <div className="field">
+          <label>Date</label>
+          <input type="date" value={f.doc_date} onChange={set('doc_date')} />
+        </div>
+      </div>
+      <div className="row">
+        <div className="field">
+          <label>Seller</label>
+          <input value={f.seller} onChange={set('seller')} placeholder="Kumar Electronics Pvt Ltd" />
+        </div>
+        <div className="field">
+          <label>Seller GSTIN</label>
+          <input value={f.seller_gstin} onChange={set('seller_gstin')} placeholder="29ABCDE1234F1Z5" />
+        </div>
+        <div className="field">
+          <label>Buyer</label>
+          <input value={f.buyer} onChange={set('buyer')} placeholder="Zen Digital Retail Ltd" />
+        </div>
+        <div className="field">
+          <label>Buyer GSTIN</label>
+          <input value={f.buyer_gstin} onChange={set('buyer_gstin')} placeholder="29AACCD1234E1Z7" />
+        </div>
+      </div>
+      <label className="tiny muted">Lines</label>
+      {lines.map((l, i) => (
+        <div className="row" key={i}>
+          <div className="field" style={{ flex: 2 }}>
+            <label>{i + 1} · Description</label>
+            <input value={l.description} onChange={(e) => setLine(i, 'description', e.target.value)}
+              placeholder="LED panel 32in" />
+          </div>
+          <div className="field">
+            <label>SKU</label>
+            <input value={l.sku} onChange={(e) => setLine(i, 'sku', e.target.value)} placeholder="KE-SP-A15" />
+          </div>
+          <div className="field">
+            <label>Qty</label>
+            <input inputMode="decimal" value={l.qty} onChange={(e) => setLine(i, 'qty', e.target.value)} />
+          </div>
+          <div className="field">
+            <label>Unit</label>
+            <input value={l.unit} onChange={(e) => setLine(i, 'unit', e.target.value)} placeholder="NOS" />
+          </div>
+          <div className="field">
+            <label>Rate ₹</label>
+            <input inputMode="decimal" value={l.rate} onChange={(e) => setLine(i, 'rate', e.target.value)} />
+          </div>
+          <div className="field" style={{ flex: 'none' }}>
+            <label>&nbsp;</label>
+            <button className="small" disabled={lines.length === 1}
+              onClick={() => setLines((ls) => ls.filter((_, j) => j !== i))}>✕</button>
+          </div>
         </div>
       ))}
+      <div className="row">
+        <button className="small" onClick={() => setLines((ls) => [...ls, { description: '', sku: '', qty: '', unit: 'NOS', rate: '' }])}>
+          + Add line
+        </button>
+        <div className="field" style={{ maxWidth: 140 }}>
+          <label>IGST ₹</label>
+          <input inputMode="decimal" value={f.igst} onChange={set('igst')} />
+        </div>
+        <div className="field" style={{ flex: 'none' }}>
+          <label>&nbsp;</label>
+          <button className="primary" disabled={attach.isPending || !f.doc_no.trim()}
+            onClick={() => attach.mutate()}>
+            {attach.isPending ? 'Attaching…' : 'Attach'}
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -467,12 +697,22 @@ function Scans({ refName }: { refName: string }) {
 
 function Pod({ refName }: { refName: string }) {
   const { data, isLoading } = useQuery({ queryKey: ['pod', refName], queryFn: () => api.pod(refName) })
+  const [adding, setAdding] = useState(false)
   const [text, setText] = useState<string | null>(null)
   if (isLoading) return <Loading />
-  if (!data?.length) return <Empty>No proof-of-delivery certificate issued yet.</Empty>
   return (
     <>
-      {data.map((c) => (
+      <div className="toolbar">
+        <button className={adding ? '' : 'primary'} onClick={() => setAdding((v) => !v)}>
+          {adding ? 'Cancel' : '+ Submit proof of delivery'}
+        </button>
+        <span className="tiny muted">A submission issues a signed certificate and marks
+           the shipment RECEIVED — the receiver-side sign-off.</span>
+      </div>
+      {adding && <PodForm refName={refName} onDone={() => setAdding(false)} />}
+      {!data?.length ? (
+        <Empty>No proof-of-delivery certificate issued yet.</Empty>
+      ) : data.map((c) => (
         <div className="card" key={c.id}>
           <h2>Certificate <span className="mono tiny">{c.id}</span></h2>
           <p className="sub">Issued {when(c.issued_at)} · signed with {c.key_id}</p>
@@ -496,5 +736,58 @@ function Pod({ refName }: { refName: string }) {
         </div>
       ))}
     </>
+  )
+}
+
+/** The receiver's web sign-off — same contract the device app submits. */
+function PodForm({ refName, onDone }: { refName: string; onDone: () => void }) {
+  const qc = useQueryClient()
+  const [error, setError] = useState<unknown>(null)
+  const nowLocal = () => new Date(Date.now() - new Date().getTimezoneOffset() * 60000)
+    .toISOString().slice(0, 16)
+  const [f, setF] = useState({ receiver_name: '', delivered_at: nowLocal() })
+  const set = (k: keyof typeof f) => (e: { target: { value: string } }) =>
+    setF((v) => ({ ...v, [k]: e.target.value }))
+
+  const submit = useMutation({
+    mutationFn: () => api.podSubmit(refName, {
+      receiver_name: f.receiver_name.trim(),
+      delivered_at: new Date(f.delivered_at).toISOString(),
+    }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['pod', refName] })
+      qc.invalidateQueries({ queryKey: ['report', refName] })
+      qc.invalidateQueries({ queryKey: ['shipments'] })
+      onDone()
+    },
+    onError: (e) => setError(e),
+  })
+
+  return (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <h2>Submit proof of delivery</h2>
+      <p className="sub">Reconciles at receipt and signs the certificate. Scans and
+         evidence normally arrive from the device; this seals a web-side delivery.</p>
+      {error ? <ErrorBox error={error} /> : null}
+      <div className="row">
+        <div className="field">
+          <label>Receiver name</label>
+          <input value={f.receiver_name} onChange={set('receiver_name')}
+            placeholder="Who signed for the goods" />
+        </div>
+        <div className="field">
+          <label>Delivered at</label>
+          <input type="datetime-local" value={f.delivered_at} onChange={set('delivered_at')} />
+        </div>
+        <div className="field" style={{ flex: 'none' }}>
+          <label>&nbsp;</label>
+          <button className="primary"
+            disabled={submit.isPending || !f.receiver_name.trim() || Number.isNaN(new Date(f.delivered_at).getTime())}
+            onClick={() => submit.mutate()}>
+            {submit.isPending ? 'Signing…' : 'Sign & submit'}
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }
