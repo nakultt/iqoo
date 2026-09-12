@@ -61,6 +61,48 @@ class NpuResidencyTest {
         assertTrue("session not released on backgrounding", NpuEngine.status == NpuEngine.Status.DOWNLOADED)
     }
 
+    @Test
+    fun loadFinishingWhileBackgroundedRollsTheFreshSessionBack() = runBlocking<Unit> {
+        // Bring the engine resident whatever an earlier test in the class
+        // left behind (JUnit gives no ordering guarantees).
+        awaitStatus(240_000) { it == NpuEngine.Status.READY || it == NpuEngine.Status.ERROR || it == NpuEngine.Status.DOWNLOADED }
+        if (NpuEngine.status == NpuEngine.Status.DOWNLOADED) {
+            NpuEngine.load()
+            awaitStatus(240_000) { it == NpuEngine.Status.READY || it == NpuEngine.Status.ERROR }
+        }
+        assumeTrue("engine did not come up", NpuEngine.isReady)
+
+        // Park the host (onStop) while a load is in flight — the exact window
+        // from issue #18: onHostBackgrounded no-ops on LOADING, so without the
+        // commit-time rollback the fresh ~4 GB session would sit resident in a
+        // process the freezer is about to park.
+        NpuEngine.unload()
+        awaitStatus(30_000) { it == NpuEngine.Status.DOWNLOADED }
+        NpuEngine.onHostBackgrounded()
+        NpuEngine.load()
+
+        // The commit must observe the backgrounded flag: the session is
+        // released, not resident, whichever way the create lands.
+        awaitStatus(240_000) { it != NpuEngine.Status.LOADING }
+        Log.i(TAG, "post-background-load status=${NpuEngine.status} err=${NpuEngine.lastError}")
+        assertTrue(
+            "session taken while backgrounded: ${NpuEngine.status}",
+            NpuEngine.status == NpuEngine.Status.DOWNLOADED,
+        )
+
+        // Foreground again: the next inference reloads on demand as usual.
+        NpuEngine.onHostForegrounded()
+        val answer = NpuEngine.run(
+            systemPrompt = "Answer with one word only.",
+            userPrompt = "Reply with the word READY.",
+            maxTokens = 8,
+            label = "backgrounded-load reload",
+        ).getOrThrow()
+        assertTrue("empty answer after foreground reload", answer.isNotBlank())
+        awaitStatus(10_000) { it == NpuEngine.Status.READY }
+        assertTrue("engine not resident after foreground use", NpuEngine.isReady)
+    }
+
     companion object {
         private const val TAG = "NpuResidencyTest"
         private var scenario: ActivityScenario<MainActivity>? = null
