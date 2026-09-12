@@ -27,6 +27,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.veritransit.inspector.ai.InspectorAi
 import com.veritransit.inspector.ui.InspectionFlowState
 import com.veritransit.inspector.ui.components.FieldLabel
 import com.veritransit.inspector.ui.components.FlowHeader
@@ -50,6 +51,7 @@ fun ManifestScreen(
     onBack: () -> Unit,
 ) {
     val manifest = flow.manifest
+    val sections = flow.billSections
     val ready = flow.sealOk && flow.driverOk
 
     FlowScaffold(
@@ -79,17 +81,28 @@ fun ManifestScreen(
             trailing = { StepBadge(2) },
         )
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            SummaryCard(manifest?.ewb ?: "—", manifest?.totalUnits ?: 0, manifest)
+            SummaryCard(
+                manifest?.ewb ?: "—",
+                manifest?.totalUnits ?: 0,
+                manifest,
+                headerLow = (sections?.header ?: 1f) < InspectorAi.LOW_SECTION_CONFIDENCE,
+                routeLow = (sections?.route ?: 1f) < InspectorAi.LOW_SECTION_CONFIDENCE,
+            )
 
             Column {
                 SectionLabel(
                     "Declared Items",
                     trailing = {
-                        Text(
-                            "${manifest?.items?.size ?: 0} Types • ${manifest?.totalUnits ?: 0} Pcs",
-                            style = androidx.compose.ui.text.TextStyle(fontFamily = Mono, fontWeight = FontWeight.Medium, fontSize = 11.sp),
-                            color = VT.Muted,
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if ((sections?.items ?: 1f) < InspectorAi.LOW_SECTION_CONFIDENCE) {
+                                LowConfidenceMark()
+                            }
+                            Text(
+                                "${manifest?.items?.size ?: 0} Types • ${manifest?.totalUnits ?: 0} Pcs",
+                                style = androidx.compose.ui.text.TextStyle(fontFamily = Mono, fontWeight = FontWeight.Medium, fontSize = 11.sp),
+                                color = VT.Muted,
+                            )
+                        }
                     },
                 )
                 Spacer(Modifier.height(10.dp))
@@ -178,7 +191,13 @@ fun ManifestScreen(
 }
 
 @Composable
-private fun SummaryCard(ewb: String, units: Int, manifest: com.veritransit.inspector.data.Manifest?) {
+private fun SummaryCard(
+    ewb: String,
+    units: Int,
+    manifest: com.veritransit.inspector.data.Manifest?,
+    headerLow: Boolean,
+    routeLow: Boolean,
+) {
     VTCard {
         Column(Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.Top) {
@@ -186,6 +205,10 @@ private fun SummaryCard(ewb: String, units: Int, manifest: com.veritransit.inspe
                     FieldLabel("E-Way Bill")
                     Spacer(Modifier.height(5.dp))
                     Text(ewb, style = mono().data.copy(fontSize = 17.sp), color = VT.Ink)
+                    if (headerLow) {
+                        Spacer(Modifier.height(4.dp))
+                        LowConfidenceMark()
+                    }
                 }
                 Column(horizontalAlignment = Alignment.End) {
                     FieldLabel("Expected Cargo")
@@ -208,8 +231,27 @@ private fun SummaryCard(ewb: String, units: Int, manifest: com.veritransit.inspe
                     Spacer(Modifier.height(5.dp))
                     Text(manifest?.route ?: "—", style = MaterialTheme.typography.titleSmall, color = VT.Ink)
                     Text("${manifest?.distanceKm ?: 0} km", style = MaterialTheme.typography.bodySmall, color = VT.Muted)
+                    if (routeLow) {
+                        Spacer(Modifier.height(4.dp))
+                        LowConfidenceMark()
+                    }
                 }
             }
         }
     }
+}
+
+/**
+ * Amber flag under a section the model itself was unsure about. Only ever
+ * shown when the model reported a confidence — an unreported section is not
+ * the same as a confident one, but inventing a warning for it would cry wolf
+ * on every demo and manual manifest.
+ */
+@Composable
+private fun LowConfidenceMark() {
+    Text(
+        "LOW CONFIDENCE — VERIFY",
+        style = androidx.compose.ui.text.TextStyle(fontFamily = Mono, fontWeight = FontWeight.Bold, fontSize = 9.sp, letterSpacing = 0.08.sp),
+        color = VT.Amber,
+    )
 }

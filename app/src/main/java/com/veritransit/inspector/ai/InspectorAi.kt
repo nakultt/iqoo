@@ -49,6 +49,12 @@ object InspectorAi {
         @SerialName("distance_km") val distanceKm: Int = 0,
         val items: List<BillItem> = emptyList(),
         val legible: Boolean = true,
+        // Per-section self-assessments, normalised through
+        // [normaliseSectionConfidence]: null means the model did not report
+        // one (older replies, or a value too garbled to trust).
+        @SerialName("header_confidence") val headerConfidence: Float? = null,
+        @SerialName("route_confidence") val routeConfidence: Float? = null,
+        @SerialName("items_confidence") val itemsConfidence: Float? = null,
     ) {
         val route: String
             get() = when {
@@ -108,6 +114,12 @@ object InspectorAi {
           items         - an array with one object per printed goods row,
                           each having the keys name, packaging, quantity
           legible       - true, or false if the document cannot be read
+          header_confidence - how sure you are of the bill number and
+                              vehicle number, between 0 and 1
+          route_confidence  - how sure you are of origin, destination
+                              and distance, between 0 and 1
+          items_confidence  - how sure you are of the goods rows,
+                              between 0 and 1
 
         Copy the values off the document. Use "" for any text field that is not
         printed, 0 for a missing number, and [] if no goods rows are printed.
@@ -133,9 +145,44 @@ object InspectorAi {
             maxTokens = 512,
             temperature = 0.1f,
             label = "Reading E-Way Bill",
-        ).mapCatching { raw ->
-            json.decodeFromString<BillReading>(extractJsonObject(raw))
-        }
+        ).mapCatching { raw -> parseBillReading(raw) }
+
+    /**
+     * Decodes a raw model reply into a [BillReading], normalising the
+     * per-section confidences on the way in. Internal so the JVM test suite
+     * can exercise the exact parsing path the device run takes.
+     */
+    internal fun parseBillReading(raw: String): BillReading {
+        val parsed = json.decodeFromString<BillReading>(extractJsonObject(raw))
+        return parsed.copy(
+            headerConfidence = normaliseSectionConfidence(parsed.headerConfidence),
+            routeConfidence = normaliseSectionConfidence(parsed.routeConfidence),
+            itemsConfidence = normaliseSectionConfidence(parsed.itemsConfidence),
+        )
+    }
+
+    /**
+     * Normalises one self-reported section confidence. The prompt asks for
+     * 0..1; a quantised model sometimes answers in percent (rescaled) or
+     * produces garbage. Garbage becomes null — *not reported* — because a
+     * missing signal must never be turned into a false all-clear, and
+     * inventing a low value would cry wolf on every reply.
+     */
+    internal fun normaliseSectionConfidence(raw: Float?): Float? = when {
+        raw == null || raw < 0f || raw > 100f -> null
+        raw <= 1f -> raw
+        else -> (raw / 100f).coerceIn(0f, 1f)
+    }
+
+    /** Below this a section carries an amber verify-manually marker. */
+    const val LOW_SECTION_CONFIDENCE = 0.5f
+
+    /** The sections of [BillReading] whose reported confidence is low enough to flag. */
+    internal fun lowConfidenceSections(reading: BillReading): List<String> = buildList {
+        if ((reading.headerConfidence ?: 1f) < LOW_SECTION_CONFIDENCE) add("header")
+        if ((reading.routeConfidence ?: 1f) < LOW_SECTION_CONFIDENCE) add("route")
+        if ((reading.itemsConfidence ?: 1f) < LOW_SECTION_CONFIDENCE) add("items")
+    }
 
     // --------------------------------------------------- cargo reconciliation
 
