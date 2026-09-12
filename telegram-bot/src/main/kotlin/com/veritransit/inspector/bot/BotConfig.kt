@@ -21,6 +21,27 @@ object BotConfig {
         secretsFileToken(File("..").resolve(SECRETS_FILE)),
     ).firstOrNull { !it.isNullOrBlank() }
 
+    /** Base URL of the VeriTransit backend (§6.4). Absent = standalone mode. */
+    fun resolvePlatformUrl(): String? = sequenceOf(
+        System.getProperty("veritransit.api.url"),
+        System.getenv("VERITRANSIT_API_URL"),
+        secretsFileValue(File(SECRETS_FILE), "veritransit.api.url"),
+        secretsFileValue(File("..").resolve(SECRETS_FILE), "veritransit.api.url"),
+    ).firstOrNull { !it.isNullOrBlank() }?.trimEnd('/')
+
+    /** Optional session token, for commands the backend requires auth for. */
+    fun resolvePlatformToken(): String? = sequenceOf(
+        System.getProperty("veritransit.api.token"),
+        System.getenv("VERITRANSIT_API_TOKEN"),
+        secretsFileValue(File(SECRETS_FILE), "veritransit.api.token"),
+    ).firstOrNull { !it.isNullOrBlank() }
+
+    private fun secretsFileValue(file: File, key: String): String? = runCatching {
+        if (!file.isFile) return null
+        Properties().apply { file.inputStream().use { load(it) } }
+            .getProperty(key)?.trim()?.takeIf { it.isNotEmpty() }
+    }.getOrNull()
+
     private fun secretsFileToken(file: File): String? = runCatching {
         if (!file.isFile) return null
         Properties().apply { file.inputStream().use { load(it) } }

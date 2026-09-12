@@ -15,6 +15,13 @@ data class BotIdentity(val id: Long, val username: String, val name: String)
 data class TgMessage(
     val chatId: Long,
     val fromName: String,
+    /**
+     * The sender's @handle, when they have one. This is what the backend maps to
+     * a user and a finance role, so an in-chat approval can be attributed and
+     * maker-checker enforced (§5.5). Null for users with no username set —
+     * those senders can read, but cannot approve.
+     */
+    val fromUsername: String? = null,
     val text: String?,
     val caption: String?,
     val hasPhoto: Boolean,
@@ -106,6 +113,7 @@ class TelegramClient(private val token: String) {
         return TgMessage(
             chatId = chatId,
             fromName = fromName,
+            fromUsername = obj["from"]?.jsonObject?.get("username")?.jsonPrimitive?.contentOrNull,
             text = obj["text"]?.jsonPrimitive?.contentOrNull,
             caption = obj["caption"]?.jsonPrimitive?.contentOrNull,
             hasPhoto = obj["photo"]?.jsonArray?.isNotEmpty() == true,

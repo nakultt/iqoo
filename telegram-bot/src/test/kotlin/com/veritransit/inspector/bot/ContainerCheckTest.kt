@@ -88,14 +88,14 @@ class ContainerCheckTest {
 
     @Test
     fun `message handler answers stats question`() {
-        val handler = MessageHandler(records) { 0L }
+        val handler = MessageHandler(records, now = { 0L })
         val reply = handler.answerQuestion("give me the shift stats")
         assertTrue("Inspections" in reply)
     }
 
     @Test
     fun `message handler routes plain ewb question to container check`() {
-        val handler = MessageHandler(records) { 0L }
+        val handler = MessageHandler(records, now = { 0L })
         val reply = handler.answerQuestion("EWB-3315-8890")
         assertTrue("Container Check" in reply)
         assertTrue("⚠️ REVIEW" in reply)

@@ -37,7 +37,25 @@ fun main(args: Array<String>) {
         return
     }
 
-    val handler = MessageHandler(BotData.seed(System.currentTimeMillis())) { System.currentTimeMillis() }
+    // §6.4 — when a backend is configured the bot becomes the agent's chat
+    // surface; without one it still answers container questions from its seed
+    // vault, so a demo on a laptop with no server keeps working.
+    val platform = BotConfig.resolvePlatformUrl()?.let { url ->
+        println("Platform surface enabled: $url")
+        PlatformCommands(PlatformClient(url, BotConfig.resolvePlatformToken()))
+    }
+    if (platform == null) {
+        println("No VERITRANSIT_API_URL configured — platform commands are unavailable.")
+    }
+
+    val handler = MessageHandler(
+        records = BotData.seed(System.currentTimeMillis()),
+        now = { System.currentTimeMillis() },
+        platform = platform,
+        // Approvals are attributed to the sender's Telegram handle, which the
+        // server maps to a user and a finance role before it acts on anything.
+        actorFor = { it.fromUsername },
+    )
     println("Long-polling for questions and receipts… (Ctrl+C to stop)")
     while (true) {
         try {
@@ -62,6 +80,14 @@ fun main(args: Array<String>) {
 class MessageHandler(
     private val records: List<InspectionRecord>,
     private val now: () -> Long,
+    /**
+     * §6.4 — the platform surface. Null when no backend is configured, in which
+     * case the bot falls back to the container-check engine over its seed
+     * vault; the two answer different questions and neither replaces the other.
+     */
+    private val platform: PlatformCommands? = null,
+    /** Telegram handle of the sender, used for maker-checker on approvals. */
+    private val actorFor: (TgMessage) -> String? = { null },
 ) {
 
     private val greetingRegex = Regex("(?i)(^|\\W)(hi|hello|hey|namaste|good\\s(morning|evening|afternoon))(\\W|$)")
@@ -69,15 +95,21 @@ class MessageHandler(
     fun respond(message: TgMessage, documentText: String? = null): String? = when {
         message.documentFileId != null -> respondToDocument(message, documentText)
         message.hasPhoto -> respondToPhoto(message)
-        else -> message.text?.trim()?.takeIf { it.isNotEmpty() }?.let(::respondToText)
+        else -> message.text?.trim()?.takeIf { it.isNotEmpty() }
+            ?.let { respondToText(it, actorFor(message)) }
     }
 
-    private fun respondToText(text: String): String =
-        if (text.startsWith("/")) respondToCommand(text) else answerQuestion(text)
+    private fun respondToText(text: String, actor: String? = null): String =
+        if (text.startsWith("/")) respondToCommand(text, actor) else answerQuestion(text)
 
-    private fun respondToCommand(text: String): String {
+    private fun respondToCommand(text: String, actor: String? = null): String {
         val command = text.substringBefore(' ').substringBefore('@').lowercase()
         val args = text.substringAfter(' ', "").trim()
+
+        // Platform questions are answered from the backend; anything it does not
+        // recognise falls through to the container-check engine unchanged.
+        platform?.handle(command, args, actor)?.let { return it }
+
         return when (command) {
             "/start" -> greeting()
             "/help" -> helpText()
