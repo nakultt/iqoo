@@ -9,9 +9,14 @@ import kotlin.random.Random
 /** App-wide observable store. Demo data only — everything lives in memory. */
 object Repo {
 
-    const val STATION = "NH-48 Tollgate"
-    const val INSPECTOR = "Insp. S. Jenkins"
-    const val BADGE = "#412"
+    /**
+     * Officer identity shown on the home header, the settings profile, the
+     * signed stamp and the dashboard handoff. Editable in Settings → Officer —
+     * the neutral defaults keep no personal name, badge or post in source.
+     */
+    var STATION by mutableStateOf("Field Station")
+    var INSPECTOR by mutableStateOf("Duty Officer")
+    var BADGE by mutableStateOf("—")
 
     var runCount by mutableStateOf(0)
         private set

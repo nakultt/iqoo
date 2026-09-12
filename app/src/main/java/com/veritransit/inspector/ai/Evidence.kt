@@ -10,6 +10,7 @@ import android.media.ExifInterface
 import android.util.Log
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
@@ -115,9 +116,17 @@ class EvidenceCamera {
  * Live viewfinder bound to the composition's lifecycle. The preview is the
  * officer's framing aid; the still that reaches the model comes from a separate
  * full-resolution capture so framing quality does not cap OCR quality.
+ *
+ * [analyzer], when given, is bound alongside the preview as an ImageAnalysis
+ * use case (the QR scanner's frame source). Passing a different analyzer
+ * rebinds the camera; the caller owns its lifecycle.
  */
 @Composable
-fun EvidenceViewfinder(camera: EvidenceCamera, modifier: Modifier = Modifier) {
+fun EvidenceViewfinder(
+    camera: EvidenceCamera,
+    modifier: Modifier = Modifier,
+    analyzer: ImageAnalysis.Analyzer? = null,
+) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val previewView = remember {
@@ -127,7 +136,7 @@ fun EvidenceViewfinder(camera: EvidenceCamera, modifier: Modifier = Modifier) {
         }
     }
 
-    DisposableEffect(lifecycleOwner) {
+    DisposableEffect(lifecycleOwner, analyzer) {
         val future = ProcessCameraProvider.getInstance(context)
         var provider: ProcessCameraProvider? = null
         future.addListener({
@@ -141,12 +150,25 @@ fun EvidenceViewfinder(camera: EvidenceCamera, modifier: Modifier = Modifier) {
                     // not latency-bound — the extra ~200 ms buys legible text.
                     .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
                     .build()
+                val useCases = buildList {
+                    add(preview)
+                    add(capture)
+                    if (analyzer != null) {
+                        add(
+                            ImageAnalysis.Builder()
+                                .setBackpressureStrategy(
+                                    ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST,
+                                )
+                                .build()
+                                .also { it.setAnalyzer(ContextCompat.getMainExecutor(context), analyzer) },
+                        )
+                    }
+                }
                 provider?.unbindAll()
                 camera.camera = provider?.bindToLifecycle(
                     lifecycleOwner,
                     CameraSelector.DEFAULT_BACK_CAMERA,
-                    preview,
-                    capture,
+                    *useCases.toTypedArray(),
                 )
                 camera.imageCapture = capture
                 camera.ready = true

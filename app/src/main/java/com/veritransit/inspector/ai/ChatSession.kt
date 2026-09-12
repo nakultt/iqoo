@@ -22,14 +22,17 @@ data class ChatTurn(
 }
 
 /**
- * A free-form conversation with the on-device model, kept inside the bundle's
+ * A free-form conversation with the model, kept inside the on-device bundle's
  * context window.
  *
  * The whole transcript is re-sent on every turn, so it has to be trimmed here —
  * there is no server-side session to lean on, and overflowing the window does
  * not degrade gracefully, it fails the generate call. The trim budget tracks
  * [NpuEngine.effectiveContextTokens], and sliding-window attention stays armed
- * underneath as a second net.
+ * underneath as a second net. The cloud fallback could take a much longer
+ * transcript, but the trim is deliberately kept: it bounds what a fallback
+ * turn can leak off the handset in one shot, and it keeps estimator drift
+ * corrections meaningful across both backends.
  */
 @Stable
 class ChatSession {
@@ -88,7 +91,7 @@ class ChatSession {
                     else estimateTokens(content.text.orEmpty()).toLong()
                 }
             }
-            NpuEngine.converse(
+            LlmGateway.converse(
                 turns = history,
                 mediaTurn = mediaTurn,
                 maxTokens = REPLY_TOKENS,
@@ -96,32 +99,44 @@ class ChatSession {
                     builder.append(token)
                     pending = builder.toString()
                 },
+                // If the NPU leg died mid-stream and the cloud leg took over,
+                // the dead leg's tokens must not stay in the transcript view.
+                onLegSwitch = {
+                    builder.setLength(0)
+                    pending = ""
+                },
             ).onSuccess { reply ->
-                val profile = NpuEngine.lastProfile
-                if (profile != null && profile.promptTokens > 0) {
-                    // Both anchors commit together, so the drift term is
-                    // always measured-vs-predicted for one and the same
-                    // exchange.
-                    measuredPromptTokens = profile.promptTokens
-                    predictedPromptTokens = predicted
-                    Log.i(
-                        TAG,
-                        "prompt measured at $measuredPromptTokens tokens " +
-                            "(estimated $predictedPromptTokens, drift ${measuredPromptTokens - predictedPromptTokens})",
-                    )
+                // The trim budget is sized for the bundle's window, so only an
+                // NPU measurement may steer it: the fallback's tokenizer counts
+                // the same transcript differently, and image tokens are
+                // accounted per the provider, not the bundle's flat 256. Cloud
+                // usage is display-only (it does feed lastStats).
+                if (LlmGateway.lastBackend == LlmGateway.Backend.NPU) {
+                    val measured = LlmGateway.lastPromptTokens
+                    if (measured > 0) {
+                        // Both anchors commit together, so the drift term is
+                        // always measured-vs-predicted for one and the same
+                        // exchange.
+                        measuredPromptTokens = measured
+                        predictedPromptTokens = predicted
+                        Log.i(
+                            TAG,
+                            "prompt measured at $measuredPromptTokens tokens " +
+                                "(estimated $predictedPromptTokens, drift ${measuredPromptTokens - predictedPromptTokens})",
+                        )
+                    }
                 }
                 turns.add(
                     ChatTurn(
                         role = ChatTurn.Role.ASSISTANT,
                         text = reply.trim().ifEmpty { "(no reply)" },
-                        stats = profile?.let {
-                            "%.0f tok/s · %d tokens".format(it.decodingSpeed, it.generatedTokens)
-                        },
+                        stats = LlmGateway.lastStats,
                     ),
                 )
             }.onFailure {
                 error = it.message ?: "Generation failed"
-                turns.removeAt(turns.lastIndex)
+                // The officer's message stays in the transcript: deleting it
+                // turned a failed send into a lost message with no retry.
             }
         } finally {
             streaming = false
@@ -186,9 +201,11 @@ class ChatSession {
         const val TAG = "ChatSession"
 
         const val SYSTEM_PROMPT =
-            "You are a helpful assistant running entirely on this phone's " +
-                "Snapdragon NPU. Answer briefly and directly. When shown an " +
-                "image, describe only what is actually in it."
+            "You are a helpful assistant for a transit compliance officer, running " +
+                "on this phone's Snapdragon NPU — or, when the on-device model is " +
+                "unavailable, on a cloud model reached through OpenRouter. Answer " +
+                "briefly and directly. When shown an image, describe only what is " +
+                "actually in it."
 
         /** Tokens of the window left for the prompt, so a reply always fits. */
         fun contextBudget(): Int =

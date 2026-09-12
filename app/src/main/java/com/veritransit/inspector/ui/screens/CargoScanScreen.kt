@@ -62,9 +62,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.veritransit.inspector.ai.EvidenceCamera
+import com.veritransit.inspector.ai.LlmGateway
 import com.veritransit.inspector.ai.EvidenceViewfinder
 import com.veritransit.inspector.ai.InspectorAi
 import com.veritransit.inspector.ai.NpuEngine
+import com.veritransit.inspector.ai.OpenRouterClient
 import com.veritransit.inspector.data.CargoItem
 import com.veritransit.inspector.data.ItemStatus
 import com.veritransit.inspector.ui.InspectionFlowState
@@ -103,7 +105,7 @@ fun CargoScanScreen(
     val askCamera = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         cameraGranted = it
     }
-    val live = NpuEngine.isReady && cameraGranted && manifest != null
+    val live = LlmGateway.isAvailable && cameraGranted && manifest != null
     var counting by remember { mutableStateOf(false) }
     var scanError by remember { mutableStateOf<String?>(null) }
 
@@ -137,6 +139,7 @@ fun CargoScanScreen(
                         flow.aiObservation = scan.observation
                         flow.aiConfidence = scan.confidence
                         flow.reconciledByAi = true
+                        flow.reconciledBy = LlmGateway.lastBackend
                         flow.scanProgress = 0
                         revealAndFinish()
                     }
@@ -163,7 +166,7 @@ fun CargoScanScreen(
     FlowScaffold(bottomBar = null) {
         FlowHeader(
             title = "Cargo Scan",
-            subtitle = "Step 3 of 3 · Bay Rig #3",
+            subtitle = "Optical count",
             onBack = onBack,
             trailing = { StepBadge(3) },
         )
@@ -178,17 +181,29 @@ fun CargoScanScreen(
                 ) {
                     EvidenceViewfinder(camera, Modifier.fillMaxSize())
                 }
+                if (!NpuEngine.isReady) {
+                    NoticeStrip(
+                        "The on-device model is not loaded — the bay photo will " +
+                            "be sent to ${OpenRouterClient.DISPLAY_NAME} on OpenRouter.",
+                    )
+                }
                 PrimaryButton(
-                    text = if (counting) "Counting on NPU…" else "Capture cargo bay",
+                    text = if (counting) "Counting…" else "Capture cargo bay",
                     onClick = ::captureAndCount,
                     enabled = camera.ready && !counting,
                 )
                 scanError?.let { NoticeStrip(it) }
-            } else if (NpuEngine.isReady && !cameraGranted && flow.scannedItems.isEmpty()) {
+            } else if (LlmGateway.isAvailable && !cameraGranted && flow.scannedItems.isEmpty()) {
                 SecondaryButton(
                     "Enable camera for live reconciliation",
                     { askCamera.launch(AndroidPermission.permission.CAMERA) },
                     modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            if (!LlmGateway.isAvailable && flow.scannedItems.isEmpty()) {
+                NoticeStrip(
+                    "No AI backend — this step runs a scripted demo walkthrough, " +
+                        "not a live count.",
                 )
             }
             VTCard {
@@ -198,10 +213,11 @@ fun CargoScanScreen(
                     Column {
                         Text("Reconciling consignment", style = MaterialTheme.typography.titleMedium, color = VT.Ink)
                         Text(
-                            if (flow.reconciledByAi) {
-                                "Qwen3-VL vision count against declared manifest"
-                            } else {
-                                "Optical match against declared manifest"
+                            when {
+                                !flow.reconciledByAi -> "Optical match against declared manifest"
+                                flow.reconciledBy == LlmGateway.Backend.CLOUD ->
+                                    "GLM-5.3-Flash vision count against declared manifest"
+                                else -> "Qwen3-VL vision count against declared manifest"
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = VT.Muted,
@@ -210,7 +226,12 @@ fun CargoScanScreen(
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                             PulseDot(VT.Azure, 7.dp)
                             Text(
-                                if (flow.reconciledByAi) "NPU · HTP0" else "SCANNER LIVE",
+                                when {
+                                    !flow.reconciledByAi -> "SCANNER LIVE"
+                                    flow.reconciledBy == LlmGateway.Backend.CLOUD ->
+                                        "GLM-5.3-FLASH · CLOUD"
+                                    else -> "NPU · HTP0"
+                                },
                                 style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.SemiBold, fontSize = 10.5.sp, letterSpacing = 0.08.sp),
                                 color = VT.Azure,
                             )

@@ -1,9 +1,27 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization")
 }
+
+/**
+ * Secrets reach the APK through the gitignored `local.properties`, never
+ * through source control — GitHub push protection (rightly) blocks commits
+ * carrying API keys. The telegram-bot module follows the same convention with
+ * its own `secrets.properties`.
+ */
+val localProperties = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) file.inputStream().use { load(it) }
+}
+
+fun buildConfigString(name: String, default: String = ""): String =
+    (localProperties.getProperty(name) ?: default)
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
 
 android {
     namespace = "com.veritransit.inspector"
@@ -19,6 +37,12 @@ android {
         versionCode = 2
         versionName = "1.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // OpenRouter cloud fallback; a missing key just disables the cloud leg.
+        buildConfigField("String", "OPENROUTER_API_KEY", "\"${buildConfigString("openrouter.api.key")}\"")
+        // Back-office web dashboard (the :dashboard module). With
+        // `adb reverse tcp:8080 tcp:8080`, 127.0.0.1:8080 on the handset
+        // reaches a dashboard running on the host machine.
+        buildConfigField("String", "DASHBOARD_URL", "\"${buildConfigString("dashboard.url", default = "http://127.0.0.1:8080")}\"")
         ndk {
             // Snapdragon only — the GenieX AAR ships ~80 MB of arm64 QNN libs and
             // nothing else; packaging other ABIs just bloats the APK.
@@ -61,6 +85,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     lint {
@@ -94,10 +119,19 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:1.4.2")
     implementation("androidx.camera:camera-view:1.4.2")
 
+    // QR / barcode decoding for the bill scanner. The bundled variant carries
+    // its own model, so detection works with the radio off — same constraint
+    // as the rest of the field pipeline.
+    implementation("com.google.mlkit:barcode-scanning:17.3.0")
+
     // JVM-side unit tests for the pure logic (reconciliation mapping, status
     // derivation, bill-reading confidence parsing) — these run in CI without
     // a device or the model bundle.
     testImplementation(kotlin("test"))
+
+    // Local HTTP server for the OpenRouter client's error/abort paths — real
+    // HttpURLConnection against a loopback socket, no network needed.
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 
     // Instrumented checks for the NPU path — they need a real Hexagon, so they
     // only run on a device with the bundle already pulled.

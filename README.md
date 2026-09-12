@@ -2,7 +2,8 @@
 
 Field inspection companion for transit & logistics compliance officers. Scan an E-Way
 Bill, verify the manifest, reconcile cargo against declarations, and record a signed
-statutory verdict — all on-device.
+statutory verdict — on-device first, with a cloud fallback when the NPU model is
+unavailable.
 
 Built with **Kotlin + Jetpack Compose (Material 3)**, following the *Field Operational
 Precision* design language: warm alabaster canvas, deep transit burgundy, restrained
@@ -50,6 +51,30 @@ Three tasks use it (`InspectorAi`):
 Every screen degrades to the scripted demo path when the model is absent, so
 the app is fully usable without the download. Manage it under
 **Settings → On-device AI**.
+
+### Cloud fallback (OpenRouter)
+
+When the NPU model is not resident, or a generation fails, AI tasks are served
+by **`z-ai/glm-5.3-flash`** through OpenRouter — that one model, no routing.
+The fallback is automatic and per-call; `LlmGateway` picks the backend and
+screens say which one answered. Privacy posture changes on that path: the
+prompt and any attached photo leave the handset for the fallback turn, which
+the Chat screen states in place.
+
+Reasoning cannot be disabled on GLM-5.3-Flash, so the client excludes
+reasoning from the streamed content, caps it at 512 tokens, and adds the same
+headroom to the completion budget.
+
+The OpenRouter API key is read from the gitignored `local.properties`
+(`openrouter.api.key=sk-or-…`) and injected as a `BuildConfig` field, so it
+ends up inside the APK but never inside source control (GitHub push
+protection rejects commits carrying keys). Without a key the cloud leg is
+disabled and the app behaves as before: on-device model or demo path.
+
+Know the exposure: anything compiled into an APK is extractable
+(`apkanalyzer`/`strings`), so whoever holds an APK holds the key. Keep the
+distribution list short, set a spend limit on the OpenRouter account, and
+rotate by changing `local.properties` and rebuilding.
 
 ### Running the on-device tests
 

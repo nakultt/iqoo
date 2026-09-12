@@ -40,7 +40,9 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.veritransit.inspector.ai.LlmGateway
 import com.veritransit.inspector.ai.NpuEngine
+import com.veritransit.inspector.ai.OpenRouterClient
 import com.veritransit.inspector.ui.components.FieldLabel
 import com.veritransit.inspector.ui.components.FlowHeader
 import com.veritransit.inspector.ui.components.FlowScaffold
@@ -158,6 +160,30 @@ fun NpuScreen(onBack: () -> Unit, onToast: (String) -> Unit, onOpenChat: () -> U
                     )
                     SpecRow("Bundle", gib(NpuEngine.BUNDLE_BYTES))
                     SpecRow("Residency", "Auto-release · auto-reload")
+                    SpecRow(
+                        "Engine mode",
+                        when (LlmGateway.mode) {
+                            LlmGateway.Mode.CLOUD -> "${OpenRouterClient.DISPLAY_NAME} · cloud first"
+                            LlmGateway.Mode.LOCAL -> "Local NPU first"
+                        },
+                    )
+                    SpecRow(
+                        "Backup engine",
+                        when (LlmGateway.mode) {
+                            LlmGateway.Mode.CLOUD ->
+                                if (NpuEngine.isReady) {
+                                    "Local NPU"
+                                } else {
+                                    "Local NPU · not loaded"
+                                }
+                            LlmGateway.Mode.LOCAL ->
+                                if (OpenRouterClient.isConfigured) {
+                                    "${OpenRouterClient.DISPLAY_NAME} · OpenRouter"
+                                } else {
+                                    "Not configured"
+                                }
+                        },
+                    )
                 }
             }
 
@@ -247,7 +273,10 @@ fun NpuScreen(onBack: () -> Unit, onToast: (String) -> Unit, onOpenChat: () -> U
 
             NoticeStrip(
                 "Weights stay on the handset. The bundle downloads once from Qualcomm's " +
-                    "asset store; after that every inspection runs with the radio off.",
+                    "asset store; after that every inspection can run with the radio off. " +
+                    "The engine is switchable in Settings → AI engine — local NPU or " +
+                    OpenRouterClient.DISPLAY_NAME + " over OpenRouter — and each reply " +
+                    "always shows which one answered.",
             )
 
             if (status == NpuEngine.Status.DOWNLOADED) {

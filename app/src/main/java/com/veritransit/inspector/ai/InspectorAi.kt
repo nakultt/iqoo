@@ -9,8 +9,9 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
 /**
- * The three inspection tasks the on-device model performs, each a single
- * stateless turn against [NpuEngine].
+ * The three inspection tasks the AI performs, each a single stateless turn
+ * against [LlmGateway] — the resident NPU model when there is one, the
+ * GLM-5.3-Flash cloud fallback otherwise.
  *
  * Every task asks for JSON and parses it leniently: a 4-bit quantised model
  * will occasionally fence its output or trail a sentence after the closing
@@ -19,7 +20,9 @@ import kotlinx.serialization.json.Json
  *
  * Token budgets are sized against [NpuEngine.effectiveContextTokens], not the
  * 4096 the model supports off-device: the AI Hub bundle is compiled to a 2048
- * context, and an evidence photo already spends ~256 of it.
+ * context, and an evidence photo already spends ~256 of it. The cloud leg has
+ * a far larger window, so there the caller's reply budget is just a floor —
+ * reasoning headroom is added on top of it.
  */
 object InspectorAi {
 
@@ -138,7 +141,7 @@ object InspectorAi {
      * result here, not an error.
      */
     suspend fun readEwayBill(imagePath: String): Result<BillReading> =
-        NpuEngine.run(
+        LlmGateway.run(
             systemPrompt = BILL_SYSTEM,
             userPrompt = BILL_PROMPT,
             imagePaths = listOf(imagePath),
@@ -247,7 +250,7 @@ object InspectorAi {
             this description as a value. Return the JSON object and nothing else.
         """.trimIndent()
 
-        return NpuEngine.run(
+        return LlmGateway.run(
             systemPrompt = CARGO_SYSTEM,
             userPrompt = prompt,
             imagePaths = listOf(imagePath),
@@ -304,6 +307,7 @@ object InspectorAi {
     suspend fun draftNote(
         record: InspectionRecord,
         onToken: (String) -> Unit = {},
+        onLegSwitch: () -> Unit = {},
     ): Result<String> {
         val lines = record.items.joinToString("\n") { item ->
             when (item.status) {
@@ -324,13 +328,14 @@ object InspectorAi {
             Write the officer's remarks for this record.
         """.trimIndent()
 
-        return NpuEngine.run(
+        return LlmGateway.run(
             systemPrompt = NOTE_SYSTEM,
             userPrompt = prompt,
             maxTokens = 192,
             temperature = 0.35f,
             label = "Drafting remarks",
             onToken = onToken,
+            onLegSwitch = onLegSwitch,
         ).map { it.trim().removeSurrounding("\"") }
     }
 

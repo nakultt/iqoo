@@ -112,7 +112,11 @@ fun RecordsScreen(
                         .background(VT.Primary),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text("SJ", style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Bold, fontSize = 13.sp), color = Color.White)
+                    Text(
+                        officerInitials(Repo.INSPECTOR),
+                        style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Bold, fontSize = 13.sp),
+                        color = Color.White,
+                    )
                 }
             }
             Spacer(Modifier.height(14.dp))
@@ -364,15 +368,16 @@ private fun AuditCard(
 }
 
 @Composable
-private fun HistoryRow(record: InspectionRecord, now: Long, anim: Modifier, onOpenRecord: (String) -> Unit) {
-    VTCard(modifier = anim.fillMaxWidth().clickable { onOpenRecord(record.id) }) {
+private fun HistoryRow(record: InspectionRecord, now: Long, anim: Modifier, onOpenRecord: (String) -> Unit) {    VTCard(modifier = anim.fillMaxWidth().clickable { onOpenRecord(record.id) }) {
         Row(Modifier.padding(15.dp), verticalAlignment = Alignment.CenterVertically) {
+            // Stacked lines, not one Row of Texts: two side-by-side mono
+            // strings leave the right-hand text whatever width is left over,
+            // and on a narrow handset that collapses it into per-character
+            // wrapping.
             Column(Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(record.vehicle, style = mono().data, color = VT.Ink)
-                    Spacer(Modifier.width(8.dp))
-                    Text("· ${record.ewb}", style = mono().dataSmall, color = VT.Muted)
-                }
+                Text(record.vehicle, style = mono().data, color = VT.Ink)
+                Spacer(Modifier.height(3.dp))
+                Text(record.ewb, style = mono().dataSmall, color = VT.Muted)
                 Spacer(Modifier.height(3.dp))
                 Text(record.cargo, style = MaterialTheme.typography.bodySmall, color = VT.Slate)
                 Spacer(Modifier.height(3.dp))
@@ -384,4 +389,17 @@ private fun HistoryRow(record: InspectionRecord, now: Long, anim: Modifier, onOp
             Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = VT.Faint, modifier = Modifier.size(20.dp))
         }
     }
+}
+
+/** Avatar initials derived from the editable officer name — no fixed string. */
+private fun officerInitials(name: String): String {
+    val words = name.split(Regex("\\s+")).filter { it.any(Char::isLetterOrDigit) }
+    if (words.isEmpty()) return "—"
+    val first = words.first().first { it.isLetterOrDigit() }.uppercaseChar()
+    if (words.size == 1) {
+        val second = words.first().firstOrNull { it.isLetterOrDigit() && it != first }
+        return "$first${(second ?: first).uppercaseChar()}"
+    }
+    val last = words.last().first { it.isLetterOrDigit() }.uppercaseChar()
+    return "$first$last"
 }

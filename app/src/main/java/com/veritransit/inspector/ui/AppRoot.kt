@@ -40,6 +40,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Alignment
@@ -53,6 +54,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.veritransit.inspector.data.DashboardSync
 import com.veritransit.inspector.data.InspectionRecord
 import com.veritransit.inspector.data.ItemStatus
 import com.veritransit.inspector.data.OfficerAction
@@ -71,6 +73,7 @@ import com.veritransit.inspector.ui.screens.ScanScreen
 import com.veritransit.inspector.ui.screens.SettingsScreen
 import com.veritransit.inspector.ui.theme.Hanken
 import com.veritransit.inspector.ui.theme.VT
+import kotlinx.coroutines.launch
 import kotlin.random.Random
 
 private enum class Tab(val label: String, val icon: ImageVector) {
@@ -102,6 +105,7 @@ fun AppRoot() {
     val stack = remember { mutableStateListOf<Page>() }
     val flow = remember { InspectionFlowState() }
     val settings = remember { AppSettings() }
+    val scope = rememberCoroutineScope()
     // Survives navigation so the transcript is still there on the way back.
     val chat = remember { com.veritransit.inspector.ai.ChatSession() }
     var toast by remember { mutableStateOf<String?>(null) }
@@ -227,6 +231,20 @@ fun AppRoot() {
                                     Repo.commit(final)
                                     feedback("Record ${final.id} committed to vault", beep = true)
                                     gotoTab(Tab.HOME)
+                                    // Back-office handoff: flips the consignment to
+                                    // shipped/held on the web dashboard and publishes
+                                    // its PDF report. The vault copy above is the
+                                    // statutory one — a failed push changes nothing.
+                                    scope.launch {
+                                        DashboardSync.push(final, flow.billEvidence, flow.cargoEvidence)
+                                            .onSuccess {
+                                                feedback(
+                                                    if (final.flagged) "Dashboard updated · consignment held"
+                                                    else "Dashboard updated · shipped, OK to pay",
+                                                )
+                                            }
+                                            .onFailure { feedback("Dashboard offline — record stays in vault") }
+                                    }
                                 },
                                 onRescan = {
                                     flow.resetForScan()
