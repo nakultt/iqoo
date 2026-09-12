@@ -172,6 +172,15 @@ object NpuEngine {
     @Volatile
     private var lastUsedAt = 0L
 
+    /**
+     * True between the host's onStop and onStart. A load that finishes in
+     * that window must not take residency: fast_freezer parks the process
+     * ~10 s after the screen goes off, and a ~4 GB session pinned in a frozen
+     * process is memory nobody can use until the user returns.
+     */
+    @Volatile
+    private var hostBackgrounded = false
+
     private var watchdogStarted = false
 
     /** Catalog name resolved at init; falls back to [MODEL_NAME]. */
@@ -436,11 +445,23 @@ object NpuEngine {
                     }
 
                     if (created != null) {
-                        vlm = created
-                        loadFailures = 0
-                        lastUsedAt = SystemClock.elapsedRealtime()
-                        status = Status.READY
-                        Log.i(TAG, "Qwen3-VL-4B resident on $COMPUTE_UNIT (attempt $attempt)")
+                        if (hostBackgrounded) {
+                            // The host went away while this create was in
+                            // flight (onHostBackgrounded no-ops on LOADING).
+                            // Roll the fresh session back instead of pinning
+                            // it in a process the freezer is about to park;
+                            // the next foregrounded use reloads on demand.
+                            Log.i(TAG, "load completed while host backgrounded — releasing the fresh session")
+                            runCatching { created.stopStream() }
+                            runCatching { created.destroy() }
+                            status = if (isBundleCached()) Status.DOWNLOADED else Status.NOT_DOWNLOADED
+                        } else {
+                            vlm = created
+                            loadFailures = 0
+                            lastUsedAt = SystemClock.elapsedRealtime()
+                            status = Status.READY
+                            Log.i(TAG, "Qwen3-VL-4B resident on $COMPUTE_UNIT (attempt $attempt)")
+                        }
                     } else {
                         loadFailures++
                         // Nothing in this process can release another client's DSP
@@ -683,10 +704,18 @@ object NpuEngine {
      * the cached bundle on demand.
      */
     fun onHostBackgrounded() {
+        hostBackgrounded = true
         if (isReady) {
             Log.i(TAG, "host backgrounded — releasing the NPU session")
             unload()
         }
+        // A LOADING session cannot be cancelled mid-create; the commit check
+        // in load() rolls it back against this flag when it finishes.
+    }
+
+    /** Called by the host activity when it becomes visible again. */
+    fun onHostForegrounded() {
+        hostBackgrounded = false
     }
 
     /**
@@ -701,9 +730,13 @@ object NpuEngine {
             while (true) {
                 delay(WATCHDOG_TICK_MS)
                 if (!isReady) continue
+                // Backgrounded residency is released on the first tick after
+                // it is observed — a safety net for any commit that raced the
+                // flag, so the window from issue #18 stays closed even if a
+                // future change reorders the load commit.
                 val idleMs = SystemClock.elapsedRealtime() - lastUsedAt
-                if (idleMs >= IDLE_UNLOAD_MS) {
-                    Log.i(TAG, "idle ${idleMs / 1000} s — releasing the NPU session")
+                if (hostBackgrounded || idleMs >= IDLE_UNLOAD_MS) {
+                    Log.i(TAG, "releasing the NPU session (backgrounded=$hostBackgrounded, idle ${idleMs / 1000} s)")
                     unload()
                 }
             }
