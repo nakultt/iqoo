@@ -23,6 +23,9 @@ class MainActivity : ComponentActivity() {
         // Brings GenieX up and reports whether the NPU bundle is already on
         // disk. Cheap, off the main thread, and every AI path is optional.
         NpuEngine.initialize(applicationContext)
+        // Warms the Kokoro voice engine so the first tamper verdict speaks
+        // without a cold-start pause. Offline, silent until needed.
+        com.veritransit.inspector.ai.KokoroVoice.initialize(applicationContext)
         setContent {
             VeriTransitTheme {
                 AppRoot()

@@ -1,0 +1,7 @@
+node_modules/
+motion/*/frames/
+# Generated artifacts — rebuild with `node build.js` (deck) / `node render.js` (motion)
+*.pptx
+*.pdf
+motion/*/output.mp4
+motion/*/poster.png

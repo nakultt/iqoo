@@ -15,6 +15,13 @@ data class BotIdentity(val id: Long, val username: String, val name: String)
 data class TgMessage(
     val chatId: Long,
     val fromName: String,
+    /**
+     * The sender's @handle, when they have one. This is what the backend maps to
+     * a user and a finance role, so an in-chat approval can be attributed and
+     * maker-checker enforced (§5.5). Null for users with no username set —
+     * those senders can read, but cannot approve.
+     */
+    val fromUsername: String? = null,
     val text: String?,
     val caption: String?,
     val hasPhoto: Boolean,
@@ -82,6 +89,26 @@ class TelegramClient(private val token: String) {
         )
     }
 
+    /**
+     * Sends a dock voice note as a Telegram voice message (ogg/wav playable
+     * in-chat). Returns the file_id so the server can dedupe on re-poll.
+     */
+    fun sendVoice(chatId: Long, audio: ByteArray, caption: String, filename: String = "alert.wav"): String {
+        require(audio.isNotEmpty()) { "empty voice note" }
+        val result = multipart(
+            "sendVoice",
+            fields = listOf(
+                "chat_id" to chatId.toString(),
+                "caption" to caption.take(MAX_CAPTION_LENGTH),
+            ),
+            fileField = "voice",
+            filename = filename,
+            mimeType = if (filename.endsWith(".ogg")) "audio/ogg" else "audio/wav",
+            fileBytes = audio,
+        ).jsonObject
+        return result["voice"]?.jsonObject?.get("file_id")?.jsonPrimitive?.contentOrNull.orEmpty()
+    }
+
     /** Downloads a document's content; intended for text-based receipts. */
     fun downloadDocumentText(fileId: String, maxBytes: Int = 128 * 1024): String {
         val info = call("getFile", listOf("file_id" to fileId)).jsonObject
@@ -106,6 +133,7 @@ class TelegramClient(private val token: String) {
         return TgMessage(
             chatId = chatId,
             fromName = fromName,
+            fromUsername = obj["from"]?.jsonObject?.get("username")?.jsonPrimitive?.contentOrNull,
             text = obj["text"]?.jsonPrimitive?.contentOrNull,
             caption = obj["caption"]?.jsonPrimitive?.contentOrNull,
             hasPhoto = obj["photo"]?.jsonArray?.isNotEmpty() == true,
@@ -147,5 +175,53 @@ class TelegramClient(private val token: String) {
         const val POLL_TIMEOUT_MS = 40_000
         const val DOWNLOAD_TIMEOUT_MS = 30_000
         const val MAX_MESSAGE_LENGTH = 4_000
+        const val MAX_CAPTION_LENGTH = 1_024
+    }
+
+    private fun multipart(
+        method: String,
+        fields: List<Pair<String, String>>,
+        fileField: String,
+        filename: String,
+        mimeType: String,
+        fileBytes: ByteArray,
+    ): JsonElement {
+        val boundary = "vt${System.currentTimeMillis().toString(36)}"
+        val out = java.io.ByteArrayOutputStream()
+        fun part(headers: String, bytes: ByteArray) {
+            out.write("--$boundary\r\n$headers\r\n\r\n".toByteArray(Charsets.UTF_8))
+            out.write(bytes)
+            out.write("\r\n".toByteArray(Charsets.UTF_8))
+        }
+        fields.forEach { (name, value) ->
+            part("Content-Disposition: form-data; name=\"$name\"", value.toByteArray(Charsets.UTF_8))
+        }
+        part(
+            "Content-Disposition: form-data; name=\"$fileField\"; filename=\"$filename\"\r\nContent-Type: $mimeType",
+            fileBytes,
+        )
+        out.write("--$boundary--\r\n".toByteArray(Charsets.UTF_8))
+
+        val conn = (URI("https://api.telegram.org/bot$token/$method").toURL().openConnection() as HttpURLConnection)
+        conn.requestMethod = "POST"
+        conn.doOutput = true
+        conn.connectTimeout = CONNECT_TIMEOUT_MS
+        conn.readTimeout = DOWNLOAD_TIMEOUT_MS
+        conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+        try {
+            conn.outputStream.use { it.write(out.toByteArray()) }
+            val stream = if (conn.responseCode in 200..299) conn.inputStream else conn.errorStream
+            val body = stream?.bufferedReader()?.use(BufferedReader::readText).orEmpty()
+            val parsed = runCatching { json.parseToJsonElement(body).jsonObject }
+                .getOrElse { throw TelegramApiException("HTTP ${conn.responseCode} from $method") }
+            if (parsed["ok"]?.jsonPrimitive?.booleanOrNull != true) {
+                throw TelegramApiException(
+                    parsed["description"]?.jsonPrimitive?.contentOrNull ?: "HTTP ${conn.responseCode} from $method",
+                )
+            }
+            return parsed["result"] ?: JsonNull
+        } finally {
+            conn.disconnect()
+        }
     }
 }

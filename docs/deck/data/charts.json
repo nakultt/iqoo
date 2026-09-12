@@ -1,0 +1,44 @@
+{
+  "_note": "Edit values here and re-run `node build.js` to regenerate the deck. Every series records its source; anything marked illustrative is a modelled placeholder, not a measured result.",
+
+  "frontline": {
+    "source": "Zebra Technologies, Warehousing Vision Study 2025 (1,700+ warehouse associates and decision-makers).",
+    "labels": [
+      "Workers who say they spend too much\ntime on tasks that could be automated",
+      "Operations reporting a shortage of\nqualified staff",
+      "Warehouse leaders who say more frontline\ntechnology will help hit productivity goals"
+    ],
+    "values": [74, 69, 82]
+  },
+
+  "exceptions": {
+    "source": "Ardent Partners, Accounts Payable Metrics that Matter 2025 — average invoice exception rate.",
+    "labels": ["Invoices that hit an exception", "Invoices that flow straight through"],
+    "values": [18.4, 81.6]
+  },
+
+  "reconciliation": {
+    "source": "Worked example: one inbound shipment, 10 units on PO ZD-4471.",
+    "categories": ["Expected on the PO", "Resolved by VeriTransit"],
+    "series": [
+      { "name": "Read from QR / barcode", "values": [0, 7] },
+      { "name": "Identified by on-device vision", "values": [0, 2] },
+      { "name": "Unresolved — worker decides", "values": [0, 1] },
+      { "name": "Declared, not yet accounted for", "values": [10, 0] }
+    ]
+  },
+
+  "cycle": {
+    "source": "ILLUSTRATIVE model, not measured. Assumes a 40-carton inbound: manual = per-carton visual check, tally sheet, later ERP entry; VeriTransit = one camera pass plus exception handling. Replace with pilot timings before any customer use.",
+    "categories": ["Count & check cargo", "Write it down", "Key into the ERP", "Chase discrepancies"],
+    "manual": [14, 6, 9, 12],
+    "veritransit": [3, 0, 0, 4]
+  },
+
+  "detection": {
+    "source": "ILLUSTRATIVE model of where a quantity or product error is caught today vs with VeriTransit.",
+    "labels": ["At the dock", "At goods receipt entry", "At invoice matching", "At payment dispute"],
+    "today": [15, 20, 40, 25],
+    "veritransit": [92, 6, 2, 0]
+  }
+}

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Release build: TLS everywhere except loopback, so scan evidence and finance
+  state can never travel a public network in the clear — a mis-typed URL fails
+  loudly instead of silently degrading.
+
+  The pilot backend on the dock LAN (laptop, no certificate) and the personal
+  Tailscale hostname are cleared for **debug builds only**, in
+  `src/debug/res/xml/network_security_config.xml` — see §12 of the master plan
+  and the Android network security configuration docs.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">localhost</domain>
+        <!-- Emulator loopback to the host machine. -->
+        <domain includeSubdomains="true">10.0.2.2</domain>
+        <domain includeSubdomains="true">127.0.0.1</domain>
+    </domain-config>
+</network-security-config>

@@ -20,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Memory
+import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material.icons.rounded.Vibration
@@ -31,6 +32,8 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -46,6 +49,7 @@ import com.veritransit.inspector.data.Repo
 import com.veritransit.inspector.ui.components.SectionLabel
 import com.veritransit.inspector.ui.components.SecondaryButton
 import com.veritransit.inspector.ui.components.VTCard
+import kotlinx.coroutines.launch
 import com.veritransit.inspector.ui.theme.Mono
 import com.veritransit.inspector.ui.theme.VT
 
@@ -104,6 +108,18 @@ fun SettingsScreen(
         Spacer(Modifier.height(10.dp))
         VTCard {
             NpuRow(onClick = onOpenNpu)
+        }
+        Spacer(Modifier.height(22.dp))
+        SectionLabel("Voice & gate announcements")
+        Spacer(Modifier.height(10.dp))
+        VTCard {
+            VoiceRows()
+        }
+        Spacer(Modifier.height(22.dp))
+        SectionLabel("Kokoro neural voice")
+        Spacer(Modifier.height(10.dp))
+        VTCard {
+            KokoroRows()
         }
         Spacer(Modifier.height(22.dp))
         SectionLabel("Preferences")
@@ -176,8 +192,7 @@ private fun NpuRow(onClick: () -> Unit) {
 
 @Composable
 private fun Divider() {
-    Box(
-        Modifier
+    Box(        Modifier
             .fillMaxWidth()
             .padding(start = 50.dp)
             .height(1.dp)
@@ -224,5 +239,156 @@ private fun InfoRow(label: String, value: String) {
     ) {
         Text(label, style = MaterialTheme.typography.titleSmall, color = VT.Ink, modifier = Modifier.weight(1f))
         Text(value, style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Medium, fontSize = 12.sp), color = VT.Muted)
+    }
+}
+
+/**
+ * Voice & gate announcements — every switch here is live immediately, works
+ * offline, and the master switch silences everything including the gate.
+ */
+@Composable
+private fun VoiceRows() {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val prefs = remember(context) { com.veritransit.inspector.data.DeviceSettings(context) }
+    var master by remember { mutableStateOf(prefs.voiceAlerts) }
+    var gate by remember { mutableStateOf(prefs.gateAnnouncements) }
+    var passes by remember { mutableStateOf(prefs.announcePasses) }
+    var tgVoice by remember { mutableStateOf(prefs.telegramVoice) }
+
+    Column {
+        ToggleRow(
+            Icons.Rounded.Mic, "Voice announcements",
+            "Kokoro voice speaks every suspect / rejected scan",
+            master,
+        ) {
+            master = it
+            prefs.voiceAlerts = it
+            if (it) com.veritransit.inspector.ai.KokoroVoice.speakSystem("Voice announcements on.")
+        }
+        Divider()
+        ToggleRow(
+            Icons.Rounded.VolumeUp, "Gate auto-announcement",
+            "Speak discrepant inspection results at the gate",
+            gate,
+        ) {
+            gate = it
+            prefs.gateAnnouncements = it
+        }
+        Divider()
+        ToggleRow(
+            Icons.Rounded.Vibration, "Announce verified scans",
+            "Also speak passes — noisy on rapid scanning",
+            passes,
+        ) {
+            passes = it
+            prefs.announcePasses = it
+        }
+        Divider()
+        ToggleRow(
+            Icons.AutoMirrored.Rounded.KeyboardArrowRight, "Telegram voice alerts",
+            "Voice note on tamper → supervisor Telegram chat",
+            tgVoice,
+        ) {
+            tgVoice = it
+            prefs.telegramVoice = it
+        }
+        Divider()
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 13.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Voice engine", style = MaterialTheme.typography.titleSmall, color = VT.Ink)
+                Text(
+                    com.veritransit.inspector.ai.KokoroVoice.voiceLabel,
+                    style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Medium, fontSize = 11.sp),
+                    color = VT.Muted,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Kokoro neural voice console: 92 MB quantized model + voice pack download
+ * once, then verdicts speak in true Kokoro voices with no network. Until the
+ * download finishes the phone speaks over system TTS — the switches above
+ * keep working either way.
+ */
+@Composable
+private fun KokoroRows() {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val prefs = remember(context) { com.veritransit.inspector.data.DeviceSettings(context) }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var voice by remember { mutableStateOf(prefs.kokoroVoice) }
+    var modelPct by remember { mutableStateOf(if (com.veritransit.inspector.ai.KokoroDownload.hasModel(context)) 100 else 0) }
+    var busy by remember { mutableStateOf(false) }
+    var note by remember { mutableStateOf<String?>(null) }
+    var hasVoice by remember { mutableStateOf(com.veritransit.inspector.ai.KokoroDownload.hasVoice(context, voice)) }
+
+    Column(Modifier.padding(horizontal = 16.dp, vertical = 13.dp)) {
+        Text("Neural voice (Kokoro-82M, on-device)", style = MaterialTheme.typography.titleSmall, color = VT.Ink)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            when {
+                modelPct >= 100 && hasVoice -> "Ready — verdicts speak as Kokoro $voice, offline."
+                modelPct >= 100 -> "Model on disk — pick a voice below to finish."
+                modelPct > 0 -> "Model downloading… $modelPct%"
+                else -> "Not installed — 92 MB one-time download, then true Kokoro voices."
+            },
+            style = MaterialTheme.typography.bodySmall, color = VT.Muted,
+        )
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            com.veritransit.inspector.ai.KokoroDownload.VOICES.forEach { v ->
+                SecondaryButton(
+                    (if (v == voice) "● " else "") + v.removePrefix("af_").replaceFirstChar { it.uppercase() },
+                    {
+                        voice = v
+                        prefs.kokoroVoice = v
+                        hasVoice = com.veritransit.inspector.ai.KokoroDownload.hasVoice(context, v)
+                        scope.launch {
+                            if (!hasVoice) {
+                                note = "Fetching $v voice pack…"
+                                hasVoice = com.veritransit.inspector.ai.KokoroDownload.fetchVoice(context, v)
+                                note = if (hasVoice) "$v ready." else "Voice fetch failed — check network."
+                            }
+                        }
+                    },
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SecondaryButton(
+                if (modelPct >= 100) "Model ✓" else if (busy) "Downloading $modelPct%" else "Download model (92 MB)",
+                {
+                    if (modelPct >= 100 || busy) return@SecondaryButton
+                    busy = true
+                    scope.launch {
+                        val ok = com.veritransit.inspector.ai.KokoroDownload.fetchModel(context) { modelPct = it }
+                        busy = false
+                        note = if (ok) "Model ready — Kokoro speaks from here on." else "Download failed — retry on Wi-Fi."
+                        if (ok && !hasVoice) {
+                            hasVoice = com.veritransit.inspector.ai.KokoroDownload.fetchVoice(context, voice)
+                        }
+                    }
+                },
+                modifier = Modifier.weight(1f),
+            )
+            SecondaryButton(
+                "Play test",
+                {
+                    com.veritransit.inspector.ai.KokoroVoice.testAnnouncement(context)
+                    note = "Speaking a sample reject alert…"
+                },
+                modifier = Modifier.weight(1f),
+            )
+        }
+        note?.let {
+            Spacer(Modifier.height(8.dp))
+            Text(it, style = MaterialTheme.typography.bodySmall, color = VT.Muted)
+        }
     }
 }

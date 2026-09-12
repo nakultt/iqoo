@@ -23,6 +23,22 @@ endpoint, no database. It uses only the JDK HTTP stack + kotlinx-serialization.
 
 Commands: `/start` `/help` `/check <ref>` `/recent` `/flagged` `/stats`.
 
+## Tamper voice alerts
+
+When the phone's Kokoro voice speaks a rejection on the dock, the audio is
+queued (`POST /v1/alerts/voice`) and this bot forwards it to the supervisor
+chat as a Telegram voice message — the supervisor hears exactly what the dock
+heard. Needs the backend plus one extra setting:
+
+```bash
+export VERITRANSIT_API_URL=http://<server>:8080
+export VERITRANSIT_SUPERVISOR_CHAT=<chat id>   # message the bot once to find yours
+```
+
+Without a supervisor chat the notes stay queued on the server (`GET
+/v1/alerts/voice/pending`) — nothing is lost, nothing is double-sent (each
+forward is acked with the Telegram file id).
+
 ## Run it
 
 ```bash

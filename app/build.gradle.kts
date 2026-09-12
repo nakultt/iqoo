@@ -3,6 +3,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization")
+    id("com.google.devtools.ksp")
 }
 
 android {
@@ -70,6 +71,9 @@ android {
 }
 
 dependencies {
+    // §9 Phase 0 — domain types shared with the backend and the bot.
+    implementation(project(":core-models"))
+
     implementation(platform("androidx.compose:compose-bom:2026.02.01"))
     implementation("androidx.activity:activity-compose:1.12.2")
     implementation("androidx.compose.ui:ui")
@@ -80,6 +84,7 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended:1.7.8")
     implementation("androidx.core:core-ktx:1.17.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.4")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.4")
 
     // On-device inference: Qwen3-VL-4B-Instruct (w4a16) on the Snapdragon NPU.
     // 0.4.0 is the floor: earlier builds resolve AI Hub models through a
@@ -88,11 +93,42 @@ dependencies {
     implementation("com.qualcomm.qti:geniex-android:0.4.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 
+    // Persistence (§6.1) — Room replaces the in-memory Repo; the outbox lives here.
+    implementation("androidx.room:room-runtime:2.7.1")
+    implementation("androidx.room:room-ktx:2.7.1")
+    ksp("androidx.room:room-compiler:2.7.1")
+
+    // Real scanning (§6.1): ML Kit decodes QR + Code128 from one frame, on-device.
+    implementation("com.google.mlkit:barcode-scanning:17.3.0")
+
+    // Ed25519 verification. Platform Ed25519 is API 33+, and minSdk here is 31,
+    // so Tink carries it on the devices that would otherwise be excluded.
+    implementation("com.google.crypto.tink:tink-android:1.13.0")
+
+    // Sync (§6.1): Ktor client + a WorkManager outbox, idempotent by client UUID.
+    implementation("io.ktor:ktor-client-core:3.0.3")
+    implementation("io.ktor:ktor-client-okhttp:3.0.3")
+    implementation("io.ktor:ktor-client-content-negotiation:3.0.3")
+    implementation("io.ktor:ktor-serialization-kotlinx-json:3.0.3")
+    implementation("androidx.work:work-runtime-ktx:2.10.0")
+
+    // Location for PoD capture (§5.4 GPS + timestamp).
+    implementation("com.google.android.gms:play-services-location:21.3.0")
+
     // Camera capture feeding the vision tower.
     implementation("androidx.camera:camera-core:1.4.2")
     implementation("androidx.camera:camera-camera2:1.4.2")
     implementation("androidx.camera:camera-lifecycle:1.4.2")
     implementation("androidx.camera:camera-view:1.4.2")
+
+    // On-device QR generation for the sender flow — labels are rendered
+    // on the phone itself (ZXing core has no Android dependency).
+    implementation("com.google.zxing:core:3.5.3")
+
+    // Real Kokoro neural voice (82M ONNX, CPU): verdicts spoken in true
+    // Kokoro voices with no network. The 92 MB weights download on demand
+    // into the app's private files dir — never bundled in the APK.
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.29.0")
 
     // JVM-side unit tests for the pure logic (reconciliation mapping, status
     // derivation, bill-reading confidence parsing) — these run in CI without

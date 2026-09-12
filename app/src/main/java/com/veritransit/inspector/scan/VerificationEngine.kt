@@ -1,0 +1,202 @@
+package com.veritransit.inspector.scan
+
+import com.veritransit.core.LabelChecks
+import com.veritransit.core.LabelToken
+import com.veritransit.core.PackageKind
+import com.veritransit.core.PackageRecord
+import com.veritransit.core.PackageStatus
+import com.veritransit.core.ReasonCode
+import com.veritransit.core.ScanKind
+import com.veritransit.core.ScanResult
+import com.veritransit.inspector.crypto.LabelVerifier
+import com.veritransit.inspector.data.local.PackageDao
+import com.veritransit.inspector.data.local.PackageEntity
+import com.veritransit.inspector.data.local.ScanOutboxDao
+
+/**
+ * §7.1 — the scanning hot path, offline, under 1.5 s to a verdict.
+ *
+ * ```
+ * decode ─ L1 signature ─ L2 binding ─ L3 QR↔barcode ─ L4 duplicate ─ verdict
+ *                                                      L5 photo/NPU, async
+ * ```
+ *
+ * Two properties are load-bearing:
+ *
+ *  * **The deterministic layers run first and complete without a network.** The
+ *    officer gets a verdict and a haptic before any photo is taken.
+ *  * **The AI can only add a flag.** [applyAiFlags] can turn VERIFIED into
+ *    SUSPECT_REVIEW; nothing it returns can turn a SUSPECT into a pass. A 4-bit
+ *    model misread should cost a supervisor visit, never a wrongful release.
+ */
+class VerificationEngine(
+    private val verifier: LabelVerifier,
+    private val packages: PackageDao,
+    private val outbox: ScanOutboxDao,
+) {
+
+    data class Verdict(
+        val result: ScanResult,
+        val reasons: List<ReasonCode>,
+        val token: LabelToken?,
+        val known: PackageEntity?,
+        /** Set when the scan opens a master that declares inner boxes (§4.4). */
+        val declaredInners: Int = 0,
+        val raw: String? = null,
+    ) {
+        val headline: String
+            get() = when (result) {
+                ScanResult.VERIFIED -> "VERIFIED"
+                ScanResult.SUSPECT_REVIEW -> "SUSPECT"
+                ScanResult.REJECTED -> "REJECT"
+            }
+        /** The officer must be told *why*, not just shown a colour (§12). */
+        val explanation: String
+            get() = reasons.joinToString(" · ") { it.message }
+    }
+
+    suspend fun evaluate(
+        qr: String?,
+        barcode: String?,
+        expectedShipment: String?,
+        kind: ScanKind,
+    ): Verdict {
+        val raw = qr ?: barcode
+
+        // A code that is not one of ours is not a failure of verification — it is
+        // a sticker, a courier label, or another system's QR.
+        val token = qr?.let { LabelToken.parse(it) }
+            ?: return Verdict(
+                ScanResult.REJECTED,
+                listOf(ReasonCode.SIGNATURE_INVALID),
+                null, null, raw = raw,
+            )
+
+        return evaluateToken(token, barcode, expectedShipment, kind).copy(raw = raw)
+    }
+
+    /**
+     * Evaluates **every** label decoded from one camera frame — the one-shot
+     * multi-carton read. Each signed token is verified independently; the
+     * frame's plain barcodes take part in the L3 QR↔barcode pairing per token
+     * (see the branch below for when a mismatch can be attributed).
+     *
+     * Bare barcodes (a Code128 whose QR has not decoded yet) produce no verdict
+     * here: alone they can never verify, and rejecting them would lock the
+     * carton out of the session before its QR ever got read — the next frame
+     * delivers the verdict instead.
+     */
+    suspend fun evaluateFrame(
+        codes: List<String>,
+        expectedShipment: String?,
+        kind: ScanKind,
+    ): List<Verdict> {
+        val barcodes = codes.filter { LabelToken.parse(it) == null }
+        return codes.mapNotNull { LabelToken.parse(it) }.map { token ->
+            // Layer 3 pairs by value: the label's own barcode is visible and
+            // matches, a *lone* foreign barcode is a moved-label signal, but
+            // with several barcodes in view only geometry could pair them —
+            // value-matching there would flag every carton against every other.
+            val paired = barcodes.firstOrNull { it == token.packageCode }
+            val barcodeCode = when {
+                paired != null -> paired
+                barcodes.size == 1 -> barcodes.single()
+                else -> null
+            }
+            evaluateToken(token, barcodeCode, expectedShipment, kind)
+        }
+    }
+
+    private suspend fun evaluateToken(
+        token: LabelToken,
+        barcodeCode: String?,
+        expectedShipment: String?,
+        kind: ScanKind,
+    ): Verdict {
+        val verified = verifier.verify(token)
+        val known = packages.byCode(token.packageCode)
+
+        // L4 — this shift's session set. The server widens this to all devices on
+        // sync (§3 check 8); the phone can only see itself.
+        val duplicate = outbox.timesSeen(token.packageCode, kind.name) > 0
+
+        val (result, reasons) = LabelChecks.evaluate(
+            token = token,
+            verified = verified,
+            expectedShipment = expectedShipment,
+            barcodeCode = barcodeCode,
+            known = known?.toCore(),
+            duplicate = duplicate,
+        )
+
+        val declaredInners = if (known != null && known.kind != PackageKind.UNIT.name) known.qty else 0
+        return Verdict(result, reasons, token, known, declaredInners, raw = null)
+    }
+
+    /**
+     * Folds the NPU's visual findings into an existing verdict. Deliberately
+     * one-directional: flags can demote a pass, never promote a failure.
+     */
+    fun applyAiFlags(verdict: Verdict, flags: Map<String, Boolean>): Verdict {
+        val added = buildList {
+            if (flags["tamper"] == true || flags["reseal"] == true) add(ReasonCode.VISUAL_TAMPER)
+            if (flags["contents_mismatch"] == true) add(ReasonCode.CONTENTS_MISMATCH)
+        }
+        if (added.isEmpty()) return verdict
+
+        return verdict.copy(
+            // Already REJECTED stays REJECTED; VERIFIED becomes SUSPECT_REVIEW.
+            result = if (verdict.result == ScanResult.REJECTED) ScanResult.REJECTED
+            else ScanResult.SUSPECT_REVIEW,
+            reasons = (verdict.reasons + added).distinct(),
+        )
+    }
+
+    /**
+     * §4.4 — closing a master. It resolves only when every declared inner is
+     * accounted for; a shortage names the value at risk rather than just failing.
+     */
+    suspend fun closeMaster(masterCode: String, scannedInners: Set<String>): MasterOutcome {
+        val master = packages.byCode(masterCode) ?: return MasterOutcome(0, 0, emptyList(), emptyList())
+        val children = packages.childrenOf(masterCode)
+
+        val declared = if (children.isNotEmpty()) children.size else master.qty
+        val expectedCodes = children.map { it.packageCode }.toSet()
+
+        val missing = expectedCodes - scannedInners
+        // A box inside a sealed master that the master never declared is the
+        // classic short-ship concealment (§4.4 INNER_UNLISTED).
+        val unlisted = scannedInners - expectedCodes
+
+        return MasterOutcome(declared, scannedInners.size, missing.toList(), unlisted.toList())
+    }
+
+    data class MasterOutcome(
+        val declared: Int,
+        val verified: Int,
+        val missing: List<String>,
+        val unlisted: List<String>,
+    ) {
+        val complete: Boolean get() = missing.isEmpty() && unlisted.isEmpty() && verified >= declared
+        val reasons: List<ReasonCode>
+            get() = buildList {
+                if (missing.isNotEmpty()) add(ReasonCode.INNER_SHORTAGE)
+                if (unlisted.isNotEmpty()) add(ReasonCode.INNER_UNLISTED)
+            }
+    }
+}
+
+fun PackageEntity.toCore() = PackageRecord(
+    packageCode = packageCode,
+    shipmentRef = shipmentRef,
+    kind = runCatching { PackageKind.valueOf(kind) }.getOrDefault(PackageKind.UNIT),
+    parentCode = parentCode,
+    contents = contents,
+    sku = sku,
+    qty = qty,
+    poLineNo = poLineNo,
+    status = runCatching { PackageStatus.valueOf(localStatus ?: status) }
+        .getOrDefault(PackageStatus.CREATED),
+    labelPayload = labelPayload,
+    copyNo = copyNo,
+)

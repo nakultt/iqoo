@@ -8,9 +8,16 @@
     <!-- Evidence capture for the vision model. -->
     <uses-permission android:name="android.permission.CAMERA" />
 
+    <!-- §5.4 — a proof-of-delivery certificate records where the handover
+         happened. Coarse is enough to place a dock; fine is requested so a
+         dispute can distinguish two gates on the same site. -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
     <application
+        android:networkSecurityConfig="@xml/network_security_config"
         android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
@@ -29,6 +36,17 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Tamper voice notes: shared to Telegram / supervisor chat. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 
 </manifest>
