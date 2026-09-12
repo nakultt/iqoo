@@ -25,6 +25,20 @@ class InspectionFlowState {
     var scannedItems by mutableStateOf<List<CargoItem>>(emptyList())
     var scanProgress by mutableStateOf(0) // items revealed so far
 
+    /** Cropped evidence frame the vision model was given, if any. */
+    var billEvidence by mutableStateOf<String?>(null)
+    var cargoEvidence by mutableStateOf<String?>(null)
+
+    /** True when this step's data came off the NPU rather than the demo presets. */
+    var manifestFromAi by mutableStateOf(false)
+    var reconciledByAi by mutableStateOf(false)
+
+    /** The model's one-line description of the cargo bay photo. */
+    var aiObservation by mutableStateOf("")
+
+    /** Confidence the model reported on the reconciliation, 0 when not used. */
+    var aiConfidence by mutableStateOf(0f)
+
     var action by mutableStateOf(OfficerAction.RECOUNT)
     var note by mutableStateOf("")
 
@@ -34,9 +48,15 @@ class InspectionFlowState {
     fun confidence() = confidenceVal
 
     /** Called once the cargo scan finishes — fixes the confidence figure and record id. */
-    fun setConfidence() {
+    fun setConfidence(reported: Float = 0f) {
         val flagged = scannedItems.any { it.status != ItemStatus.MATCHED }
-        confidenceVal = if (flagged) 0.88f + Random.nextFloat() * 0.07f else 0.955f + Random.nextFloat() * 0.04f
+        confidenceVal = when {
+            // The model reports its own confidence on the reconciliation; use it
+            // rather than inventing one, so the figure on the record is real.
+            reported > 0f -> reported.coerceIn(0.5f, 0.999f)
+            flagged -> 0.88f + Random.nextFloat() * 0.07f
+            else -> 0.955f + Random.nextFloat() * 0.04f
+        }
         draftId = "VT-2025-" + (1000 + Random.nextInt(9000))
     }
 
@@ -66,6 +86,10 @@ class InspectionFlowState {
         note = ""
         action = OfficerAction.RECOUNT
         confidenceVal = 0f
+        cargoEvidence = null
+        reconciledByAi = false
+        aiObservation = ""
+        aiConfidence = 0f
     }
 
     fun startNew(startInManual: Boolean) {
@@ -76,6 +100,8 @@ class InspectionFlowState {
         presetIndex = 0
         sealOk = false
         driverOk = false
+        billEvidence = null
+        manifestFromAi = false
         resetForScan()
     }
 

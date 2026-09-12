@@ -61,6 +61,11 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.veritransit.inspector.data.InspectionRecord
 import com.veritransit.inspector.data.ItemStatus
+import androidx.compose.material.icons.rounded.AutoAwesome
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import com.veritransit.inspector.ai.InspectorAi
+import com.veritransit.inspector.ai.NpuEngine
 import com.veritransit.inspector.data.OfficerAction
 import com.veritransit.inspector.data.Verdict
 import com.veritransit.inspector.ui.InspectionFlowState
@@ -189,6 +194,7 @@ fun ResultScreen(
     if (showNote && flow != null) {
         NoteDialog(
             initial = flow.note,
+            record = record,
             onSave = { flow.note = it; showNote = false },
             onDismiss = { showNote = false },
         )
@@ -509,8 +515,33 @@ private fun StampOverlay(visible: Boolean, action: OfficerAction, onDone: () -> 
 /* ------------------------------- Note dialog ------------------------------- */
 
 @Composable
-private fun NoteDialog(initial: String, onSave: (String) -> Unit, onDismiss: () -> Unit) {
+private fun NoteDialog(
+    initial: String,
+    record: InspectionRecord,
+    onSave: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
     var text by remember { mutableStateOf(initial) }
+    var drafting by remember { mutableStateOf(false) }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+
+    fun draft() {
+        if (drafting) return
+        drafting = true
+        text = ""
+        scope.launch {
+            try {
+                // Streamed so the officer watches it appear rather than waiting
+                // on a spinner — decode is ~30 tok/s, long enough to notice.
+                InspectorAi.draftNote(record) { token ->
+                    scope.launch(Dispatchers.Main) { text += token }
+                }.onFailure { text = "" }
+            } finally {
+                drafting = false
+            }
+        }
+    }
+
     Dialog(onDismissRequest = onDismiss) {
         VTCard(radius = 12.dp) {
             Column(Modifier.padding(18.dp)) {
@@ -530,6 +561,15 @@ private fun NoteDialog(initial: String, onSave: (String) -> Unit, onDismiss: () 
                         .height(90.dp),
                     cursorBrush = androidx.compose.ui.graphics.SolidColor(VT.Primary),
                 )
+                if (NpuEngine.isReady) {
+                    Spacer(Modifier.height(10.dp))
+                    SecondaryButton(
+                        if (drafting) "Drafting on NPU…" else "Draft with on-device AI",
+                        { draft() },
+                        icon = Icons.Rounded.AutoAwesome,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
                 Spacer(Modifier.height(14.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     SecondaryButton("Cancel", onDismiss, modifier = Modifier.weight(1f))

@@ -18,6 +18,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Logout
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
+import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material.icons.rounded.Vibration
@@ -39,6 +41,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.veritransit.inspector.ai.NpuEngine
 import com.veritransit.inspector.data.Repo
 import com.veritransit.inspector.ui.components.SectionLabel
 import com.veritransit.inspector.ui.components.SecondaryButton
@@ -56,6 +59,7 @@ class AppSettings {
 fun SettingsScreen(
     settings: AppSettings,
     onToast: (String) -> Unit,
+    onOpenNpu: () -> Unit,
 ) {
     Column(
         Modifier
@@ -96,6 +100,12 @@ fun SettingsScreen(
             }
         }
         Spacer(Modifier.height(22.dp))
+        SectionLabel("Inference")
+        Spacer(Modifier.height(10.dp))
+        VTCard {
+            NpuRow(onClick = onOpenNpu)
+        }
+        Spacer(Modifier.height(22.dp))
         SectionLabel("Preferences")
         Spacer(Modifier.height(10.dp))
         VTCard {
@@ -112,15 +122,55 @@ fun SettingsScreen(
         Spacer(Modifier.height(10.dp))
         VTCard {
             Column {
-                InfoRow("App version", "1.0.0")
+                InfoRow("App version", "1.1.0")
                 Divider()
                 InfoRow("Build", "VT-100 · Field Release")
                 Divider()
                 InfoRow("Data storage", "On-device only")
+                Divider()
+                InfoRow("Inference", "Snapdragon NPU · offline")
             }
         }
         Spacer(Modifier.height(26.dp))
         SecondaryButton("Sign Out", { onToast("Signed out — demo build keeps you at the gate") }, icon = Icons.AutoMirrored.Rounded.Logout, modifier = Modifier.fillMaxWidth())
+    }
+}
+
+/** Entry point to the on-device model manager, with live engine status. */
+@Composable
+private fun NpuRow(onClick: () -> Unit) {
+    val (label, tint) = when (NpuEngine.status) {
+        NpuEngine.Status.READY, NpuEngine.Status.BUSY -> "Loaded on NPU" to VT.Emerald
+        NpuEngine.Status.DOWNLOADING -> "Downloading ${NpuEngine.downloadPercent}%" to VT.Azure
+        NpuEngine.Status.LOADING -> "Loading…" to VT.Azure
+        NpuEngine.Status.DOWNLOADED -> "Installed · not loaded" to VT.Amber
+        NpuEngine.Status.ERROR -> "Unavailable" to VT.Crimson
+        else -> "Not installed" to VT.Muted
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 13.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Rounded.Memory, null, tint = VT.Slate, modifier = Modifier.size(21.dp))
+        Spacer(Modifier.width(13.dp))
+        Column(Modifier.weight(1f)) {
+            Text("On-device AI", style = MaterialTheme.typography.titleSmall, color = VT.Ink)
+            Text(
+                NpuEngine.DISPLAY_NAME,
+                style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Medium, fontSize = 11.sp),
+                color = VT.Muted,
+            )
+        }
+        Text(
+            label,
+            style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Medium, fontSize = 11.sp),
+            color = tint,
+        )
+        Spacer(Modifier.width(6.dp))
+        Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = VT.Faint, modifier = Modifier.size(18.dp))
     }
 }
 

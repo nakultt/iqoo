@@ -5,6 +5,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.ui.graphics.toArgb
+import com.veritransit.inspector.ai.NpuEngine
 import com.veritransit.inspector.data.Repo
 import com.veritransit.inspector.ui.AppRoot
 import com.veritransit.inspector.ui.theme.VeriTransitTheme
@@ -19,6 +20,9 @@ class MainActivity : ComponentActivity() {
         )
         super.onCreate(savedInstanceState)
         Repo.init(System.currentTimeMillis())
+        // Brings GenieX up and reports whether the NPU bundle is already on
+        // disk. Cheap, off the main thread, and every AI path is optional.
+        NpuEngine.initialize(applicationContext)
         setContent {
             VeriTransitTheme {
                 AppRoot()

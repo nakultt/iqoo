@@ -1,5 +1,9 @@
 package com.veritransit.inspector.ui.screens
 
+import android.Manifest as AndroidPermission
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.LinearEasing
@@ -52,6 +56,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -65,24 +70,33 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import com.veritransit.inspector.ai.EvidenceCamera
+import com.veritransit.inspector.ai.EvidenceViewfinder
+import com.veritransit.inspector.ai.InspectorAi
+import com.veritransit.inspector.ai.NpuEngine
 import com.veritransit.inspector.data.Manifest
 import com.veritransit.inspector.data.Presets
 import com.veritransit.inspector.ui.InspectionFlowState
 import com.veritransit.inspector.ui.components.FieldLabel
 import com.veritransit.inspector.ui.components.FlowHeader
 import com.veritransit.inspector.ui.components.FlowScaffold
+import com.veritransit.inspector.ui.components.NoticeStrip
 import com.veritransit.inspector.ui.components.PrimaryButton
+import com.veritransit.inspector.ui.components.SecondaryButton
 import com.veritransit.inspector.ui.components.StepBadge
 import com.veritransit.inspector.ui.components.VTCard
 import com.veritransit.inspector.ui.theme.Mono
 import com.veritransit.inspector.ui.theme.VT
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @Composable
 fun ScanScreen(
@@ -202,20 +216,77 @@ private fun Bracket(corner: CornerQ, modifier: Modifier) {
 private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedback: (String) -> Unit) {
     val haptics = LocalHapticFeedback.current
     val hapticsEnabled = com.veritransit.inspector.ui.theme.LocalHapticsEnabled.current
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var torch by remember { mutableStateOf(false) }
 
-    LaunchedEffect(Unit) {
-        if (!flow.detected) {
+    val camera = remember { EvidenceCamera() }
+    var cameraGranted by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, AndroidPermission.permission.CAMERA) ==
+                PackageManager.PERMISSION_GRANTED,
+        )
+    }
+    val askCamera = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        cameraGranted = it
+    }
+
+    // The live path needs both halves: a resident model and a camera to feed it.
+    // Without either, the frame stays the scripted demo scene.
+    val live = NpuEngine.isReady && cameraGranted
+    var reading by remember { mutableStateOf(false) }
+    var readError by remember { mutableStateOf<String?>(null) }
+
+    fun captureAndRead() {
+        if (reading || !camera.ready) return
+        reading = true
+        readError = null
+        scope.launch {
+            try {
+                val frame = camera.capture(context)
+                if (frame == null) {
+                    readError = camera.error ?: "Camera could not take the shot."
+                    return@launch
+                }
+                flow.billEvidence = frame.absolutePath
+                InspectorAi.readEwayBill(frame.absolutePath)
+                    .onSuccess { bill ->
+                        if (bill.usable) {
+                            flow.manifest = bill.toManifest()
+                            flow.manifestFromAi = true
+                            if (hapticsEnabled) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                            flow.detected = true
+                        } else {
+                            readError = "Nothing legible in frame — fill it with the bill and hold steady."
+                        }
+                    }
+                    .onFailure { readError = it.message ?: "The model could not parse that document." }
+            } finally {
+                reading = false
+            }
+        }
+    }
+
+    LaunchedEffect(live) {
+        // Scripted resolve only on the demo path; the live path waits for a shot.
+        if (!live && !flow.detected) {
             delay(3600)
             flow.detected = true
         }
     }
     LaunchedEffect(flow.detected) {
         if (flow.detected) {
-            feedback("Manifest resolved · E-Way Bill locked")
+            feedback(
+                if (flow.manifestFromAi) {
+                    "E-Way Bill read on-device · NPU"
+                } else {
+                    "Manifest resolved · E-Way Bill locked"
+                },
+            )
             onDetected()
         }
     }
+    LaunchedEffect(torch, camera.ready) { if (live) camera.setTorch(torch) }
 
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Box(
@@ -224,14 +295,14 @@ private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedba
                 .aspectRatio(1.18f)
                 .clip(RoundedCornerShape(12.dp))
                 .background(Color(0xFF141A22))
-                .clickable {
-                    if (!flow.detected) {
-                        flow.detected = true
-                        if (hapticsEnabled) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                    }
+                .clickable(enabled = !live && !flow.detected) {
+                    flow.detected = true
+                    if (hapticsEnabled) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                 },
         ) {
-            Canvas(Modifier.fillMaxSize()) {
+            if (live) {
+                EvidenceViewfinder(camera, Modifier.fillMaxSize())
+            } else Canvas(Modifier.fillMaxSize()) {
                 val w = size.width
                 val h = size.height
                 drawRect(Brush.verticalGradient(listOf(Color(0xFF232B36), Color(0xFF161C25), Color(0xFF0F141B))))
@@ -329,12 +400,17 @@ private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedba
         }
         Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
             Text(
-                if (flow.detected) "Manifest captured" else "Align QR code or barcode within frame",
+                when {
+                    reading -> "Reading document on the NPU…"
+                    flow.detected -> "Manifest captured"
+                    live -> "Fill the frame with the E-Way Bill"
+                    else -> "Align QR code or barcode within frame"
+                },
                 style = MaterialTheme.typography.bodyMedium,
                 color = VT.Slate,
                 textAlign = TextAlign.Center,
             )
-            if (!flow.detected) {
+            if (!flow.detected && !live) {
                 Text(
                     "Demo build — tap the frame to capture instantly",
                     style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Normal, fontSize = 10.5.sp),
@@ -343,6 +419,28 @@ private fun Viewfinder(flow: InspectionFlowState, onDetected: () -> Unit, feedba
                 )
             }
         }
+
+        if (live) {
+            PrimaryButton(
+                text = when {
+                    reading -> "Reading…"
+                    flow.detected -> "Re-read document"
+                    else -> "Capture & read bill"
+                },
+                onClick = ::captureAndRead,
+                enabled = camera.ready && !reading,
+                icon = Icons.Rounded.QrCodeScanner,
+            )
+        } else if (NpuEngine.isReady && !cameraGranted) {
+            SecondaryButton(
+                "Enable camera for live reading",
+                { askCamera.launch(AndroidPermission.permission.CAMERA) },
+                icon = Icons.Rounded.QrCodeScanner,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+
+        readError?.let { NoticeStrip(it) }
     }
 
     DetectedCard(flow)

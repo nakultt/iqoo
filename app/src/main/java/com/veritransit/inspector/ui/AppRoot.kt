@@ -63,6 +63,7 @@ import com.veritransit.inspector.ui.screens.CargoScanScreen
 import com.veritransit.inspector.ui.screens.AppSettings
 import com.veritransit.inspector.ui.screens.HomeScreen
 import com.veritransit.inspector.ui.screens.ManifestScreen
+import com.veritransit.inspector.ui.screens.NpuScreen
 import com.veritransit.inspector.ui.screens.RecordsScreen
 import com.veritransit.inspector.ui.screens.ResultScreen
 import com.veritransit.inspector.ui.screens.ScanScreen
@@ -83,6 +84,7 @@ private sealed interface Page {
     data object CargoScan : Page
     data object ResultActive : Page
     data class ResultView(val recordId: String) : Page
+    data object NpuModel : Page
 }
 
 private sealed interface NavTarget {
@@ -174,9 +176,17 @@ fun AppRoot() {
                             onOpenRecord = { id -> stack.add(Page.ResultView(id)) },
                             onToast = { feedback(it) },
                         )
-                        Tab.SETTINGS -> SettingsScreen(settings = settings, onToast = { feedback(it) })
+                        Tab.SETTINGS -> SettingsScreen(
+                            settings = settings,
+                            onToast = { feedback(it) },
+                            onOpenNpu = { stack.add(Page.NpuModel) },
+                        )
                     }
                     is NavTarget.PageT -> when (val page = target.page) {
+                        Page.NpuModel -> NpuScreen(
+                            onBack = { stack.removeAt(stack.lastIndex) },
+                            onToast = { feedback(it) },
+                        )
                         Page.ManifestStep -> ManifestScreen(
                             flow = flow,
                             onToggleSeal = { flow.sealOk = !flow.sealOk },
@@ -190,7 +200,7 @@ fun AppRoot() {
                         Page.CargoScan -> CargoScanScreen(
                             flow = flow,
                             onScanComplete = {
-                                if (flow.confidence() == 0f) flow.setConfidence()
+                                if (flow.confidence() == 0f) flow.setConfidence(flow.aiConfidence)
                                 stack.add(Page.ResultActive)
                             },
                             onBack = { stack.removeAt(stack.lastIndex) },
