@@ -21,6 +21,21 @@ machine-verified values.
 | Records | Searchable/filterable audit vault with flagged-consignment audit card |
 | Settings | Inspector profile, sound & haptic feedback, app info |
 
+## Telegram container-check bot
+
+[telegram-bot/](telegram-bot/) is a companion JVM service that shares the
+inspector's vault: message the bot an E-Way Bill, vehicle number, or a receipt
+(photo caption / text file) and it replies with the container check — manifest
+reconciliation, discrepancies, verdict and recommended statutory action.
+
+```bash
+VERITRANSIT_BOT_TOKEN=<token> ./gradlew :telegram-bot:run
+```
+
+See [telegram-bot/README.md](telegram-bot/README.md) for the full command set
+and token handling (token is read from the environment or a gitignored file —
+never committed).
+
 ## Highlights
 
 - **Fully offline demo** — in-memory data, zero permissions, no network access.
@@ -54,6 +69,8 @@ app/src/main/java/com/veritransit/inspector/
     ├── theme/       # color tokens, typography (variable fonts), theme
     ├── components/  # chips, buttons, cards, evidence canvas, flow scaffolding
     └── screens/     # Home, Scan, Manifest, CargoScan, Result, Records, Settings
+telegram-bot/           # Telegram container-check companion service (JVM)
+└── src/…/bot/          # long-poll client, container-check engine, routing
 ```
 
 *Demo data only — not affiliated with any real transport authority.*
