@@ -94,6 +94,11 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:1.4.2")
     implementation("androidx.camera:camera-view:1.4.2")
 
+    // JVM-side unit tests for the residency policy — run in CI without a
+    // device or the model bundle. test-junit so kotlin.test.Test resolves to
+    // a concrete framework annotation.
+    testImplementation(kotlin("test-junit"))
+
     // Instrumented checks for the NPU path — they need a real Hexagon, so they
     // only run on a device with the bundle already pulled.
     androidTestImplementation("androidx.test:runner:1.6.2")

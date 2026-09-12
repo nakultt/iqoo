@@ -30,6 +30,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
@@ -168,6 +170,27 @@ object NpuEngine {
     private var sdkInitialised = false
     private var loadFailures = 0
 
+    /**
+     * Residency bookkeeping for the auto-release / auto-reload lifecycle.
+     *
+     * [residencyEpoch] is the destructive-interleave guard: every load
+     * captures it on entry and re-checks it before committing its wrapper,
+     * and every unload bumps it under the inference lock. A load that an
+     * unload superseded therefore destroys its own freshly-built wrapper
+     * instead of leaking a resident session the officer asked to drop.
+     */
+    private val residencyEpoch = AtomicLong(0L)
+
+    /** Last real use of the resident model — the idle watchdog's input. */
+    @Volatile
+    private var lastUsedAtMs = 0L
+
+    /** When the app last went to the background; null while foregrounded. */
+    @Volatile
+    private var backgroundedAtMs: Long? = null
+
+    private var watchdogStarted = false
+
     // ---------------------------------------------------------------- init
 
     /**
@@ -179,6 +202,7 @@ object NpuEngine {
         if (status != Status.COLD && status != Status.ERROR) return
         appContext = context.applicationContext
         status = Status.INITIALIZING
+        startResidencyWatchdog()
         scope.launch {
             try {
                 if (!sdkInitialised) {
@@ -192,6 +216,39 @@ object NpuEngine {
                 fail("GenieX init failed: ${e.message}")
             }
         }
+    }
+
+    /**
+     * Drops the resident session when it stops earning its ~4 GB of cDSP:
+     * after [ResidencyPolicy.IDLE_UNLOAD_AFTER_MS] with no inference, or once
+     * [ResidencyPolicy.BACKGROUND_UNLOAD_AFTER_MS] of continuous background
+     * elapses. Runs only while READY — never during a load or an in-flight
+     * generation.
+     */
+    private fun startResidencyWatchdog() {
+        if (watchdogStarted) return
+        watchdogStarted = true
+        scope.launch {
+            while (true) {
+                delay(60_000)
+                val now = System.currentTimeMillis()
+                val idleDue = ResidencyPolicy.idleUnloadDue(lastUsedAtMs, now)
+                val bgDue = ResidencyPolicy.backgroundUnloadDue(backgroundedAtMs, now)
+                if ((!idleDue && !bgDue) || status != Status.READY) continue
+                Log.i(TAG, "unloading resident model (idleDue=$idleDue bgDue=$bgDue)")
+                unload()
+            }
+        }
+    }
+
+    /** Called from the activity's onStop: arms the background unload timer. */
+    fun onAppBackgrounded() {
+        if (backgroundedAtMs == null) backgroundedAtMs = System.currentTimeMillis()
+    }
+
+    /** Called from the activity's onStart: cancels any pending background unload. */
+    fun onAppForegrounded() {
+        backgroundedAtMs = null
     }
 
     private suspend fun initSdk(context: Context) = suspendCoroutine { cont ->
@@ -363,6 +420,7 @@ object NpuEngine {
         if (status == Status.LOADING || isReady) return
         status = Status.LOADING
         lastError = null
+        val epochAtEntry = residencyEpoch.get()
         scope.launch {
             try {
                 val paths = ModelManagerWrapper.getPaths(hubModelName)
@@ -400,8 +458,21 @@ object NpuEngine {
                 for (attempt in 1..LOAD_ATTEMPTS) {
                     val result = VlmWrapper.builder().vlmCreateInput(input).build()
                     result.onSuccess { wrapper ->
+                        if (residencyEpoch.get() != epochAtEntry) {
+                            // An unload was requested while this create was in
+                            // flight. Release the fresh wrapper instead of
+                            // leaking a resident session that was asked to go.
+                            Log.i(TAG, "load superseded by unload — releasing the fresh wrapper")
+                            runCatching { wrapper.stopStream() }
+                            runCatching { wrapper.destroy() }
+                            if (status == Status.LOADING) {
+                                status = if (isBundleCached()) Status.DOWNLOADED else Status.NOT_DOWNLOADED
+                            }
+                            return@launch
+                        }
                         vlm = wrapper
                         loadFailures = 0
+                        lastUsedAtMs = System.currentTimeMillis()
                         status = Status.READY
                         Log.i(TAG, "Qwen3-VL-4B resident on $COMPUTE_UNIT (attempt $attempt)")
                         return@launch
@@ -456,8 +527,12 @@ object NpuEngine {
     }
 
     fun unload() {
+        // Bump first, under no lock: any load in flight discovers the bump at
+        // its commit check and releases its own fresh wrapper (see load()).
+        residencyEpoch.incrementAndGet()
         scope.launch {
             inferenceLock.withLock {
+                val wasResident = status == Status.READY || status == Status.BUSY
                 vlm?.let { w ->
                     runCatching { w.stopStream() }
                     runCatching { w.destroy() }
@@ -465,12 +540,49 @@ object NpuEngine {
                 vlm = null
                 lastProfile = null
                 activity = null
-                status = if (isBundleCached()) Status.DOWNLOADED else Status.NOT_DOWNLOADED
+                // Only an unload of a *resident* session decides the status; a
+                // concurrent auto-reload owns LOADING and fixes it itself.
+                if (wasResident) {
+                    status = if (isBundleCached()) Status.DOWNLOADED else Status.NOT_DOWNLOADED
+                }
             }
         }
     }
 
     // ----------------------------------------------------------- inference
+
+    /**
+     * Makes sure a resident wrapper exists, transparently reloading the model
+     * when the bundle is cached but the session was dropped — by the idle or
+     * background unload, or by the officer from the NPU screen. The caller
+     * never needs to visit a settings screen or restart the app; that was the
+     * only recovery path before, and it is gone.
+     */
+    private suspend fun ensureResident(): Result<VlmWrapper> {
+        vlm?.let { return Result.success(it) }
+        when (status) {
+            Status.DOWNLOADED -> {
+                Log.i(TAG, "model not resident — reloading on demand")
+                load()
+                awaitResident(RELOAD_AWAIT_TIMEOUT_MS)
+            }
+
+            Status.LOADING -> awaitResident(RELOAD_AWAIT_TIMEOUT_MS)
+
+            else -> return Result.failure(
+                IllegalStateException("Model not loaded — open Settings → On-device AI (state: ${status.name.lowercase()})."),
+            )
+        }
+        return vlm?.let { Result.success(it) }
+            ?: Result.failure(IllegalStateException("Model is not ready (${status.name.lowercase()}) — try again shortly."))
+    }
+
+    /** Waits out an in-flight [load]; returns early on success or failure. */
+    private suspend fun awaitResident(timeoutMs: Long) {
+        withTimeoutOrNull(timeoutMs) {
+            while (vlm == null && status == Status.LOADING) delay(250)
+        }
+    }
 
     /**
      * Runs one stateless turn: the session is reset first, so each call sees
@@ -489,7 +601,8 @@ object NpuEngine {
         label: String? = null,
         onToken: (String) -> Unit = {},
     ): Result<String> {
-        val wrapper = vlm ?: return Result.failure(IllegalStateException("Model not loaded"))
+        val wrapper = ensureResident().getOrElse { return Result.failure(it) }
+        lastUsedAtMs = System.currentTimeMillis()
         return inferenceLock.withLock {
             status = Status.BUSY
             activity = label
@@ -533,7 +646,8 @@ object NpuEngine {
         temperature: Float = 0.7f,
         onToken: (String) -> Unit = {},
     ): Result<String> {
-        val wrapper = vlm ?: return Result.failure(IllegalStateException("Model not loaded"))
+        val wrapper = ensureResident().getOrElse { return Result.failure(it) }
+        lastUsedAtMs = System.currentTimeMillis()
         return inferenceLock.withLock {
             status = Status.BUSY
             activity = "Thinking"
@@ -610,4 +724,11 @@ object NpuEngine {
 
     /** Multiplied by the attempt number, so gaps grow: 2 s, then 4 s. */
     private const val LOAD_RETRY_BACKOFF_MS = 2_000L
+
+    /**
+     * Ceiling for waiting out an on-demand reload: a cold load is ~10-30 s and
+     * the retry loop can add ~6 s of backoff, so three minutes covers the
+     * worst field conditions without ever hanging a scan screen.
+     */
+    private const val RELOAD_AWAIT_TIMEOUT_MS = 180_000L
 }

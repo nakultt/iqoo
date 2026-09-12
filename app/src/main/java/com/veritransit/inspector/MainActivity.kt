@@ -29,4 +29,18 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    override fun onStart() {
+        super.onStart()
+        // Returning to the foreground cancels a pending background unload;
+        // if the model was already released, the next AI call reloads it.
+        NpuEngine.onAppForegrounded()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // The screen going dark at a weighbridge is routine; only a sustained
+        // absence (ResidencyPolicy grace) gives the ~4 GB of cDSP back.
+        NpuEngine.onAppBackgrounded()
+    }
 }
