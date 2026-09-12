@@ -1,0 +1,383 @@
+<meta charset="utf-8">
+<title>VeriTransit — verification workflow</title>
+<style>
+  html,body { margin:0; padding:0; background:#F4F3F0; }
+  canvas { display:block; }
+</style>
+<canvas id="c" width="1920" height="1080"></canvas>
+<script>
+// Deterministic frame renderer: render(t) is a pure function of time in seconds.
+// The capture script calls window.render(t) then screenshots — no CSS transitions,
+// no requestAnimationFrame, so every frame is reproducible.
+
+const C = {
+  bg:      '#F4F3F0',
+  surface: '#FFFFFF',
+  inset:   '#EFEDE9',
+  hair:    '#E2E8F0',
+  border:  '#CBD5E1',
+  ink:     '#0F172A',
+  slate:   '#334155',
+  muted:   '#64748B',
+  faint:   '#94A3B8',
+  brand:   '#7E1530',
+  brandDeep:'#5C001D',
+  emerald: '#059669',
+  emeraldBg:'#ECFDF5',
+  amber:   '#B45309',
+  amberDot:'#D97706',
+  amberBg: '#FFFBEB',
+  crimson: '#B91C1C',
+  azure:   '#0284C7',
+  azureBg: '#F0F9FF',
+};
+
+const F = '"Helvetica Neue", Helvetica, Arial, sans-serif';
+const ctx = document.getElementById('c').getContext('2d');
+
+/* ---------- tiny math / easing ---------- */
+const clamp = (v,a=0,b=1) => Math.max(a, Math.min(b, v));
+const lerp  = (a,b,u) => a + (b-a)*u;
+// progress of a cue starting at `start`, lasting `dur`
+const p = (t, start, dur) => clamp((t - start) / dur);
+const easeOut  = u => 1 - Math.pow(1-u, 3);
+const easeInOut= u => u < .5 ? 4*u*u*u : 1 - Math.pow(-2*u+2, 3)/2;
+// fade + rise reveal
+function reveal(t, start, dur = 0.5) {
+  const u = easeOut(p(t, start, dur));
+  return { a: u, dy: (1-u) * 14 };
+}
+
+/* ---------- primitives ---------- */
+function rr(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.arcTo(x+w, y,   x+w, y+h, r);
+  ctx.arcTo(x+w, y+h, x,   y+h, r);
+  ctx.arcTo(x,   y+h, x,   y,   r);
+  ctx.arcTo(x,   y,   x+w, y,   r);
+  ctx.closePath();
+}
+function card(x, y, w, h, { fill = C.surface, stroke = C.hair, r = 16, lw = 1.5, shadow = true } = {}) {
+  ctx.save();
+  if (shadow) { ctx.shadowColor = 'rgba(15,23,42,0.06)'; ctx.shadowBlur = 18; ctx.shadowOffsetY = 5; }
+  ctx.fillStyle = fill; rr(x,y,w,h,r); ctx.fill();
+  ctx.restore();
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; rr(x,y,w,h,r); ctx.stroke(); }
+}
+function text(str, x, y, { size = 22, weight = 400, color = C.ink, align = 'left', spacing = 0, font = F } = {}) {
+  ctx.save();
+  ctx.font = `${weight} ${size}px ${font}`;
+  ctx.fillStyle = color;
+  ctx.textAlign = spacing ? 'left' : align;
+  ctx.textBaseline = 'alphabetic';
+  if (spacing) {
+    const total = str.split('').reduce((s,ch) => s + ctx.measureText(ch).width + spacing, -spacing);
+    let cx = align === 'center' ? x - total/2 : align === 'right' ? x - total : x;
+    for (const ch of str) { ctx.fillText(ch, cx, y); cx += ctx.measureText(ch).width + spacing; }
+  } else {
+    ctx.fillText(str, x, y);
+  }
+  ctx.restore();
+}
+function pill(x, y, w, h, label, { fill, stroke, color, size = 17 }) {
+  ctx.fillStyle = fill; rr(x,y,w,h,h/2); ctx.fill();
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1.4; rr(x,y,w,h,h/2); ctx.stroke(); }
+  text(label, x + w/2, y + h/2 + size*0.35, { size, weight: 700, color, align: 'center' });
+}
+// line with optional draw-on progress
+function conn(x1, y1, x2, y2, prog = 1, { color = C.border, lw = 2, arrow = true, dash = null } = {}) {
+  if (prog <= 0) return;
+  const ex = lerp(x1, x2, prog), ey = lerp(y1, y2, prog);
+  ctx.save();
+  ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.lineCap = 'round';
+  if (dash) ctx.setLineDash(dash);
+  ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(ex,ey); ctx.stroke();
+  ctx.restore();
+  if (arrow && prog > 0.94) {
+    const ang = Math.atan2(y2-y1, x2-x1), s = 9;
+    ctx.save(); ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(x2, y2);
+    ctx.lineTo(x2 - s*Math.cos(ang - 0.42), y2 - s*Math.sin(ang - 0.42));
+    ctx.lineTo(x2 - s*Math.cos(ang + 0.42), y2 - s*Math.sin(ang + 0.42));
+    ctx.closePath(); ctx.fill(); ctx.restore();
+  }
+}
+function tick(cx, cy, r, color) {
+  ctx.save();
+  ctx.fillStyle = color; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2); ctx.fill();
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = r*0.26; ctx.lineCap='round'; ctx.lineJoin='round';
+  ctx.beginPath();
+  ctx.moveTo(cx - r*0.42, cy + r*0.03);
+  ctx.lineTo(cx - r*0.09, cy + r*0.36);
+  ctx.lineTo(cx + r*0.44, cy - r*0.34);
+  ctx.stroke(); ctx.restore();
+}
+function qrGlyph(x, y, s, color) {
+  ctx.save(); ctx.fillStyle = color;
+  const u = s/7;
+  const eye = (ex, ey) => {
+    ctx.fillRect(ex, ey, u*3, u*3);
+    ctx.clearRect(ex+u, ey+u, u, u);
+    ctx.fillStyle = color;
+  };
+  eye(x, y); eye(x + u*4, y); eye(x, y + u*4);
+  ctx.fillRect(x + u*4, y + u*4, u, u);
+  ctx.fillRect(x + u*6, y + u*4, u, u);
+  ctx.fillRect(x + u*5, y + u*5, u, u);
+  ctx.fillRect(x + u*4, y + u*6, u, u);
+  ctx.fillRect(x + u*6, y + u*6, u, u);
+  ctx.restore();
+}
+
+/* ---------- scene constants ---------- */
+const DUR = 15.0;                       // total seconds
+const PANEL = { x: 96, y: 224, w: 556, h: 556 };
+const BOX = { w: 86, h: 86, gapX: 18, gapY: 22, cols: 5 };
+
+// 10 cartons: 7 resolve by QR, 2 by vision, 1 stays unknown
+const BOXES = Array.from({ length: 10 }, (_, i) => {
+  const kind = i < 7 ? 'qr' : i < 9 ? 'ai' : 'unknown';
+  const at = kind === 'qr' ? 1.55 + i * 0.17
+           : kind === 'ai' ? 3.70 + (i - 7) * 0.36
+           : 4.85;
+  return { i, kind, at };
+});
+function boxXY(i) {
+  const gx = PANEL.x + 26, gy = PANEL.y + 132;
+  return { x: gx + (i % BOX.cols) * (BOX.w + BOX.gapX), y: gy + Math.floor(i / BOX.cols) * (BOX.h + BOX.gapY) };
+}
+
+const LANES = [
+  { key:'qr',  label:'Multi-QR scan',     note:'7 of 10 codes read',     at: 1.35, color: C.azure,   bg: C.azureBg },
+  { key:'ai',  label:'On-device vision',  note:'2 more identified',      at: 3.45, color: C.brand,   bg: '#FBF1F3' },
+  { key:'doc', label:'Document read',     note:'PO ZD-4471 · 10 units',  at: 5.35, color: C.slate,   bg: C.inset  },
+];
+const LANE = { x: 756, w: 322, h: 92, y0: 300, gap: 128 };
+const LEDGER = { x: 1166, y: 296, w: 316, h: 244 };
+const VERDICT = { x: 1166, y: 576, w: 316, h: 132 };
+const OUT = { x: 1548, w: 276, h: 106, y0: 300, gap: 128 };
+const OUTPUTS = [
+  { label:'Goods-receipt record', sub:'GRN + evidence photos', at: 10.4, color: C.emerald },
+  { label:'Discrepancy report',   sub:'sent to supplier + AP',  at: 10.9, color: C.amber   },
+  { label:'Supervisor alert',     sub:'Telegram, in seconds',   at: 11.4, color: C.azure   },
+];
+
+/* ---------- scene pieces ---------- */
+function drawHeader(t) {
+  const a = reveal(t, 0.15, 0.6);
+  ctx.save(); ctx.globalAlpha = a.a;
+  text('VERITRANSIT · RECEIVING COPILOT', 96, 96 + a.dy, { size: 17, weight: 700, color: C.brand, spacing: 2.6 });
+  text('Physical shipment, reconciled against the digital order', 96, 148 + a.dy, { size: 40, weight: 700, color: C.ink });
+  ctx.restore();
+  const b = reveal(t, 0.5, 0.6);
+  ctx.save(); ctx.globalAlpha = b.a;
+  text('Shipment SHP-2026-090231   ·   PO ZD-4471   ·   10 units expected', 96, 190 + b.dy,
+       { size: 22, weight: 500, color: C.muted });
+  ctx.restore();
+}
+
+function drawPhysicalPanel(t) {
+  const a = reveal(t, 0.75, 0.6);
+  ctx.save(); ctx.globalAlpha = a.a; ctx.translate(0, a.dy);
+
+  card(PANEL.x, PANEL.y, PANEL.w, PANEL.h);
+  text('PHYSICAL', PANEL.x + 26, PANEL.y + 48, { size: 15, weight: 700, color: C.faint, spacing: 2.2 });
+  text('What is actually on the dock', PANEL.x + 26, PANEL.y + 84, { size: 25, weight: 700, color: C.ink });
+  text('One worker · one phone · one pass', PANEL.x + 26, PANEL.y + 114, { size: 18, weight: 400, color: C.muted });
+
+  // camera sweep band while scanning is live
+  const sweep = p(t, 1.25, 3.9);
+  if (sweep > 0 && sweep < 1) {
+    const gy = PANEL.y + 126, gh = 2*BOX.h + BOX.gapY + 16;
+    const y = gy + easeInOut(sweep) * gh;
+    const g = ctx.createLinearGradient(0, y - 46, 0, y + 8);
+    g.addColorStop(0, 'rgba(126,21,48,0)'); g.addColorStop(1, 'rgba(126,21,48,0.14)');
+    ctx.fillStyle = g; ctx.fillRect(PANEL.x + 18, y - 46, PANEL.w - 36, 54);
+    ctx.strokeStyle = 'rgba(126,21,48,0.55)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(PANEL.x + 18, y); ctx.lineTo(PANEL.x + PANEL.w - 18, y); ctx.stroke();
+  }
+
+  for (const b of BOXES) {
+    const { x, y } = boxXY(b.i);
+    const done = p(t, b.at, 0.42);
+    const unknownLive = b.kind === 'unknown' && t > b.at;
+    const pulse = unknownLive ? 0.5 + 0.5*Math.sin((t - b.at) * 3.4) : 0;
+
+    let fill = C.inset, stroke = C.border;
+    if (b.kind !== 'unknown' && done > 0) {
+      fill = b.kind === 'qr' ? C.azureBg : '#FBF1F3';
+      stroke = b.kind === 'qr' ? '#7DD3FC' : '#E7C3CC';
+    } else if (unknownLive) {
+      fill = C.amberBg; stroke = `rgba(217,119,6,${0.45 + 0.45*pulse})`;
+    }
+    ctx.fillStyle = fill; rr(x, y, BOX.w, BOX.h, 12); ctx.fill();
+    ctx.strokeStyle = stroke; ctx.lineWidth = unknownLive ? 2.4 : 1.6; rr(x, y, BOX.w, BOX.h, 12); ctx.stroke();
+
+    // carton glyph
+    ctx.strokeStyle = done > 0 || unknownLive ? 'rgba(15,23,42,0.20)' : 'rgba(15,23,42,0.13)';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.moveTo(x + 14, y + 30); ctx.lineTo(x + BOX.w - 14, y + 30); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x + BOX.w/2, y + 10); ctx.lineTo(x + BOX.w/2, y + 30); ctx.stroke();
+
+    if (b.kind === 'qr' && done > 0) {
+      ctx.save(); ctx.globalAlpha = done; qrGlyph(x + BOX.w/2 - 15, y + 42, 30, C.azure); ctx.restore();
+    }
+    if (b.kind === 'ai' && done > 0) {
+      ctx.save(); ctx.globalAlpha = done;
+      text('AI', x + BOX.w/2, y + 62, { size: 21, weight: 700, color: C.brand, align: 'center' });
+      ctx.restore();
+    }
+    if (unknownLive) {
+      ctx.save(); ctx.globalAlpha = 0.55 + 0.45*pulse;
+      text('?', x + BOX.w/2, y + 66, { size: 34, weight: 700, color: C.amberDot, align: 'center' });
+      ctx.restore();
+    }
+    if (b.kind !== 'unknown' && done > 0) {
+      ctx.save(); ctx.globalAlpha = done;
+      tick(x + BOX.w - 8, y + 8, 11 * (0.6 + 0.4*done), b.kind === 'qr' ? C.azure : C.brand);
+      ctx.restore();
+    }
+  }
+
+  // live counter
+  const counted = BOXES.filter(b => b.kind !== 'unknown' && t >= b.at + 0.3).length;
+  const cy = PANEL.y + PANEL.h - 52;
+  text(`${counted} of 10 resolved`, PANEL.x + 26, cy, { size: 21, weight: 700, color: C.ink });
+  const barX = PANEL.x + 232, barW = PANEL.w - 232 - 26;
+  ctx.fillStyle = C.inset; rr(barX, cy - 15, barW, 12, 6); ctx.fill();
+  ctx.fillStyle = C.brand;  rr(barX, cy - 15, Math.max(2, barW * counted/10), 12, 6); ctx.fill();
+  ctx.restore();
+}
+
+function drawLanes(t) {
+  LANES.forEach((l, i) => {
+    const y = LANE.y0 + i * LANE.gap;
+    const a = reveal(t, l.at, 0.5);
+    const active = t > l.at && t < l.at + 2.1;
+    ctx.save(); ctx.globalAlpha = a.a; ctx.translate(0, a.dy);
+    card(LANE.x, y, LANE.w, LANE.h, {
+      fill: active ? l.bg : C.surface,
+      stroke: active ? l.color : C.hair,
+      lw: active ? 2 : 1.5,
+    });
+    ctx.fillStyle = l.color; rr(LANE.x, y + 18, 4, LANE.h - 36, 2); ctx.fill();
+    text(l.label, LANE.x + 26, y + 42, { size: 23, weight: 700, color: C.ink });
+    text(l.note,  LANE.x + 26, y + 70, { size: 18, weight: 400, color: C.muted });
+    ctx.restore();
+
+    // connector in from the physical panel
+    conn(PANEL.x + PANEL.w, PANEL.y + PANEL.h/2, LANE.x - 8, y + LANE.h/2,
+         easeOut(p(t, l.at - 0.15, 0.5)), { color: active ? l.color : C.border, lw: active ? 2.4 : 1.8 });
+    // connector out to the ledger
+    conn(LANE.x + LANE.w, y + LANE.h/2, LEDGER.x - 8, LEDGER.y + LEDGER.h/2,
+         easeOut(p(t, l.at + 0.9, 0.55)), { color: C.border, lw: 1.8 });
+  });
+}
+
+function drawLedger(t) {
+  const a = reveal(t, 6.5, 0.55);
+  if (a.a <= 0) return;
+  ctx.save(); ctx.globalAlpha = a.a; ctx.translate(0, a.dy);
+  card(LEDGER.x, LEDGER.y, LEDGER.w, LEDGER.h);
+  text('RECONCILE', LEDGER.x + 24, LEDGER.y + 42, { size: 15, weight: 700, color: C.faint, spacing: 2.2 });
+
+  const rows = [
+    { k: 'Expected',   v: 10, c: C.ink,     at: 6.9  },
+    { k: 'QR read',    v: 7,  c: C.azure,   at: 7.25 },
+    { k: 'AI vision',  v: 2,  c: C.brand,   at: 7.60 },
+    { k: 'Unknown',    v: 1,  c: C.amberDot, at: 7.95 },
+  ];
+  rows.forEach((r, i) => {
+    const y = LEDGER.y + 84 + i * 42;
+    const u = easeOut(p(t, r.at, 0.45));
+    if (u <= 0) return;
+    ctx.save(); ctx.globalAlpha = u;
+    text(r.k, LEDGER.x + 24, y, { size: 21, weight: 500, color: C.slate });
+    const shown = Math.round(lerp(0, r.v, u));
+    text(String(shown), LEDGER.x + LEDGER.w - 24, y, { size: 26, weight: 700, color: r.c, align: 'right' });
+    if (i < rows.length - 1) {
+      ctx.strokeStyle = C.hair; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(LEDGER.x + 24, y + 13); ctx.lineTo(LEDGER.x + LEDGER.w - 24, y + 13); ctx.stroke();
+    }
+    ctx.restore();
+  });
+  ctx.restore();
+}
+
+function drawVerdict(t) {
+  const a = reveal(t, 8.7, 0.5);
+  if (a.a <= 0) return;
+  const pulse = 0.5 + 0.5*Math.sin((t - 8.7) * 2.6);
+  ctx.save(); ctx.globalAlpha = a.a; ctx.translate(0, a.dy);
+  card(VERDICT.x, VERDICT.y, VERDICT.w, VERDICT.h, {
+    fill: C.amberBg, stroke: `rgba(217,119,6,${t < 10.6 ? 0.55 + 0.4*pulse : 0.8})`, lw: 2.4,
+  });
+  text('1 PACKAGE NEEDS A LOOK', VERDICT.x + 22, VERDICT.y + 48, { size: 19.5, weight: 700, color: C.amber });
+  text('9 verified · 1 unidentified', VERDICT.x + 24, VERDICT.y + 80, { size: 19, weight: 400, color: C.slate });
+  text('Everything else is already done', VERDICT.x + 24, VERDICT.y + 106, { size: 17, weight: 400, color: C.muted });
+  ctx.restore();
+  conn(LEDGER.x + LEDGER.w/2, LEDGER.y + LEDGER.h, VERDICT.x + VERDICT.w/2, VERDICT.y - 8,
+       easeOut(p(t, 8.5, 0.4)), { color: C.amberDot, lw: 2.4 });
+}
+
+function drawOutputs(t) {
+  OUTPUTS.forEach((o, i) => {
+    const y = OUT.y0 + i * OUT.gap;
+    const a = reveal(t, o.at, 0.5);
+    if (a.a <= 0) return;
+    ctx.save(); ctx.globalAlpha = a.a; ctx.translate(0, a.dy);
+    card(OUT.x, y, OUT.w, OUT.h, { stroke: C.hair });
+    ctx.fillStyle = o.color; ctx.beginPath(); ctx.arc(OUT.x + 26, y + 34, 6, 0, Math.PI*2); ctx.fill();
+    text(o.label, OUT.x + 44, y + 41, { size: 20, weight: 700, color: C.ink });
+    text(o.sub,   OUT.x + 44, y + 70, { size: 17, weight: 400, color: C.muted });
+    ctx.restore();
+    conn(VERDICT.x + VERDICT.w, VERDICT.y + VERDICT.h/2, OUT.x - 8, y + OUT.h/2,
+         easeOut(p(t, o.at - 0.2, 0.5)), { color: C.border, lw: 1.8 });
+  });
+
+  const a = reveal(t, 12.1, 0.6);
+  if (a.a > 0) {
+    ctx.save(); ctx.globalAlpha = a.a; ctx.translate(0, a.dy);
+    text('The worker handled one exception. The record wrote itself.',
+         960, 1012, { size: 26, weight: 700, color: C.ink, align: 'center' });
+    ctx.restore();
+  }
+}
+
+function drawFooter(t) {
+  const a = reveal(t, 0.9, 0.6);
+  ctx.save(); ctx.globalAlpha = a.a * 0.9;
+  ctx.strokeStyle = C.hair; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(96, 902); ctx.lineTo(1824, 902); ctx.stroke();
+  const stages = ['SCAN', 'IDENTIFY', 'RECONCILE', 'DECIDE', 'RECORD'];
+  const cues   = [1.35, 3.45, 6.5, 8.7, 10.4];
+  stages.forEach((s, i) => {
+    const x = 96 + i * ((1824-96)/stages.length) + 60;
+    const on = t >= cues[i];
+    ctx.save(); ctx.globalAlpha = on ? 1 : 0.32;
+    ctx.fillStyle = on ? C.brand : C.faint;
+    ctx.beginPath(); ctx.arc(x - 22, 935, 5.5, 0, Math.PI*2); ctx.fill();
+    text(s, x - 6, 942, { size: 16, weight: 700, color: on ? C.ink : C.faint, spacing: 2 });
+    ctx.restore();
+  });
+  ctx.restore();
+}
+
+/* ---------- master render ---------- */
+window.render = function (t) {
+  ctx.save();
+  ctx.fillStyle = C.bg; ctx.fillRect(0, 0, 1920, 1080);
+  ctx.restore();
+  drawHeader(t);
+  drawFooter(t);
+  drawPhysicalPanel(t);
+  drawLanes(t);
+  drawLedger(t);
+  drawVerdict(t);
+  drawOutputs(t);
+};
+window.DUR = DUR;
+window.render(DUR); // static preview when opened by hand
+</script>

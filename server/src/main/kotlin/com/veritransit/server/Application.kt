@@ -49,6 +49,7 @@ class Services(
     val pod: PodService,
     val agent: AgentService,
     val webhooks: WebhookService,
+    val voiceAlerts: VoiceAlertService,
     val operatorSecret: String,
 ) {
     /** §4.2 — devices pin these and verify labels with no network. */
@@ -92,10 +93,12 @@ fun buildServices(config: Config): Services {
         serverLog.info("notify [{}] {}\n{}", audience, subject, message)
     }
     val agent = AgentService(db, audit, matcher, risk, finance, shipments, notifier)
+    val voiceAlerts = VoiceAlertService(db, audit)
 
     return Services(
         config, db, signer, audit, Sessions(db, sessionSecret, operatorSecret),
         shipments, labels, scans, documents, matcher, finance, risk, pod, agent, webhooks,
+        voiceAlerts,
         operatorSecret,
     )
 }

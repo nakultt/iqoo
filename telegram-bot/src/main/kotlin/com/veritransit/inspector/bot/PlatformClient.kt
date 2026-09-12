@@ -71,6 +71,23 @@ class PlatformClient(private val baseUrl: String, private val token: String?) {
     suspend fun agentActions(ref: String?): List<AgentAction> =
         client.get("$baseUrl/v1/agent/actions${ref?.let { "?shipment=$it" } ?: ""}").body()
 
+    // ------------------------------------------------- tamper voice alerts
+    // The dock speaks first (Kokoro voice on the phone); the bot carries the
+    // exact audio to the supervisor chat as a voice message.
+
+    suspend fun pendingVoiceAlerts(limit: Int = 10): List<com.veritransit.core.VoiceAlertItem> =
+        runCatching {
+            client.get("$baseUrl/v1/alerts/voice/pending?limit=$limit")
+                .body<List<com.veritransit.core.VoiceAlertItem>>()
+        }.getOrDefault(emptyList())
+
+    suspend fun ackVoiceAlert(id: String, tgFileId: String, actor: String = "telegram-bot"): Boolean =
+        runCatching {
+            client.post("$baseUrl/v1/alerts/voice/$id/delivered?tg_file_id=$tgFileId") {
+                auth(this, actor)
+            }.status.value == 200
+        }.getOrDefault(false)
+
     /**
      * Relays an approval. The server enforces that the approver is not the
      * maker — the bot does not and must not decide that itself.

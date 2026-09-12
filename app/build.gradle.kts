@@ -125,6 +125,11 @@ dependencies {
     // on the phone itself (ZXing core has no Android dependency).
     implementation("com.google.zxing:core:3.5.3")
 
+    // Real Kokoro neural voice (82M ONNX, CPU): verdicts spoken in true
+    // Kokoro voices with no network. The 92 MB weights download on demand
+    // into the app's private files dir — never bundled in the APK.
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.29.0")
+
     // Instrumented checks for the NPU path — they need a real Hexagon, so they
     // only run on a device with the bundle already pulled.
     androidTestImplementation("androidx.test:runner:1.6.2")

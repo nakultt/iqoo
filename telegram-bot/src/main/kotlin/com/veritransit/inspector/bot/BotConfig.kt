@@ -36,6 +36,18 @@ object BotConfig {
         secretsFileValue(File(SECRETS_FILE), "veritransit.api.token"),
     ).firstOrNull { !it.isNullOrBlank() }
 
+    /**
+     * Supervisor chat for tamper voice alerts: the bot forwards each dock
+     * voice note there as a Telegram voice message. A supervisor gets it by
+     * messaging the bot once; the chat id comes from any incoming message id
+     * only when this is unset — explicit config wins.
+     */
+    fun resolveSupervisorChat(): Long? = sequenceOf(
+        System.getProperty("telegram.supervisor.chat"),
+        System.getenv("VERITRANSIT_SUPERVISOR_CHAT"),
+        secretsFileValue(File(SECRETS_FILE), "telegram.supervisor.chat"),
+    ).firstOrNull { !it.isNullOrBlank() }?.toLongOrNull()
+
     private fun secretsFileValue(file: File, key: String): String? = runCatching {
         if (!file.isFile) return null
         Properties().apply { file.inputStream().use { load(it) } }

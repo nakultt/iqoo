@@ -145,6 +145,45 @@ class VeriTransitRepo private constructor(
     suspend fun masterChildren(master: String) = db.packages().childrenOf(master)
     suspend fun packageByCode(code: String) = db.packages().byCode(code)
 
+    // ------------------------------------------------- telegram voice alerts
+
+    /**
+     * Uploads a tamper voice note for bot forwarding. Returns true when the
+     * server queued it; false keeps the phone's WAV as the record plus the
+     * share-sheet path — the alert is never dropped silently.
+     */
+    suspend fun uploadVoiceAlert(
+        shipmentRef: String?,
+        packageCode: String?,
+        verdict: com.veritransit.core.ScanResult,
+        reasons: List<com.veritransit.core.ReasonCode>,
+        audio: java.io.File,
+    ): Boolean {
+        val client = api() ?: return false
+        return try {
+            val bytes = audio.readBytes()
+            if (bytes.isEmpty()) return false
+            client.uploadVoiceAlert(
+                com.veritransit.core.VoiceAlertUpload(
+                    shipmentRef = shipmentRef,
+                    packageCode = packageCode,
+                    verdict = verdict,
+                    caption = com.veritransit.core.VoiceAlertText.telegramCaption(
+                        shipmentRef, packageCode, verdict, reasons,
+                    ),
+                    mimeType = "audio/wav",
+                    audioB64 = java.util.Base64.getEncoder().encodeToString(bytes),
+                    officer = settings.officerName,
+                )
+            )
+            true
+        } catch (_: Throwable) {
+            false
+        } finally {
+            client.close()
+        }
+    }
+
     // ------------------------------------------------------------- sync
 
     private fun api(): ApiClient? {
@@ -329,4 +368,33 @@ class DeviceSettings(context: Context) {
     var demoMode: Boolean
         get() = prefs.getBoolean("demo_mode", true)
         set(v) = prefs.edit().putBoolean("demo_mode", v).apply()
+
+    // ------------------------------------------------- voice announcements
+    // Persisted (not compose state) so the scanner hot path, the gate result
+    // screen and Settings all read the same switches.
+
+    /** Master switch — off means total silence, including gate results. */
+    var voiceAlerts: Boolean
+        get() = prefs.getBoolean("voice_alerts", true)
+        set(v) = prefs.edit().putBoolean("voice_alerts", v).apply()
+
+    /** Speak discrepant gate inspection results (the gate auto-announcement). */
+    var gateAnnouncements: Boolean
+        get() = prefs.getBoolean("gate_announcements", true)
+        set(v) = prefs.edit().putBoolean("gate_announcements", v).apply()
+
+    /** Also speak VERIFIED passes (noisy on rapid scanning; off by default). */
+    var announcePasses: Boolean
+        get() = prefs.getBoolean("announce_passes", false)
+        set(v) = prefs.edit().putBoolean("announce_passes", v).apply()
+
+    /** Record a voice note on tamper and queue it for the supervisor Telegram. */
+    var telegramVoice: Boolean
+        get() = prefs.getBoolean("telegram_voice", true)
+        set(v) = prefs.edit().putBoolean("telegram_voice", v).apply()
+
+    /** Kokoro neural voice pack (af_sarah default). Downloaded on demand. */
+    var kokoroVoice: String
+        get() = prefs.getString("kokoro_voice", "af_sarah") ?: "af_sarah"
+        set(v) = prefs.edit().putString("kokoro_voice", v).apply()
 }

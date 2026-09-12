@@ -98,6 +98,25 @@ fun ResultScreen(
     var showNote by remember { mutableStateOf(false) }
     val active = flow != null
 
+    // Gate auto-announcement: speaks a discrepant result once, when the live
+    // inspection lands here. Old vault records (flow == null) stay silent.
+    val context = androidx.compose.ui.platform.LocalContext.current
+    LaunchedEffect(record.id, active) {
+        if (active && record.verdict == Verdict.REVIEW) {
+            val flagged = record.items.filter { it.status != ItemStatus.MATCHED }.map {
+                when (it.status) {
+                    ItemStatus.SHORTAGE -> "${it.name}, short by ${it.expected - it.found}"
+                    ItemStatus.UNLISTED -> "${it.name}, unlisted"
+                    else -> it.name
+                }
+            }
+            val unlisted = record.items.count { it.status == ItemStatus.UNLISTED }
+            com.veritransit.inspector.ai.VoiceAnnouncer.announceGate(
+                context, record.ewb, flagged, unlisted,
+            )
+        }
+    }
+
     Box(Modifier.fillMaxSize().background(VT.Alabaster)) {
         Column(
             Modifier

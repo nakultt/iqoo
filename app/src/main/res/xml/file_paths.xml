@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Tamper voice notes rendered by KokoroVoice into cache/voice_alert_*.wav -->
+    <cache-path name="voice" path="." />
+</paths>

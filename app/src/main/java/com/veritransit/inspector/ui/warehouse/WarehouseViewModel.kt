@@ -5,6 +5,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.veritransit.core.ScanKind
 import com.veritransit.core.ScanResult
+import com.veritransit.inspector.ai.KokoroVoice
+import com.veritransit.inspector.ai.VoiceAnnouncer
+import com.veritransit.inspector.data.DeviceSettings
 import com.veritransit.inspector.data.VeriTransitRepo
 import com.veritransit.inspector.data.local.PackageEntity
 import com.veritransit.inspector.data.local.ShipmentEntity
@@ -96,6 +99,48 @@ class WarehouseViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }
             refreshCounts()
+
+            // Spoken the moment anything is wrong: the officer hears the reason
+            // without lowering the phone, and the supervisor gets a voice note.
+            VoiceAnnouncer.announceScan(
+                getApplication(), verdict.result,
+                verdict.token?.packageCode, verdict.reasons,
+            )
+            if (VoiceAnnouncer.wantsVoiceNote(verdict.result, verdict.reasons) &&
+                DeviceSettings(getApplication()).telegramVoice
+            ) {
+                queueVoiceNote(verdict)
+            }
+        }
+    }
+
+    /**
+     * Records the spoken alert to a WAV and queues it for the supervisor
+     * Telegram chat. Offline-first: the file lives on the phone regardless;
+     * the server upload is best-effort and the share sheet always works.
+     */
+    private fun queueVoiceNote(verdict: VerificationEngine.Verdict) {
+        viewModelScope.launch {
+            val app = getApplication<Application>()
+            val caption = com.veritransit.core.VoiceAlertText.telegramCaption(
+                _selected.value, verdict.token?.packageCode, verdict.result, verdict.reasons,
+            )
+            // Neural Kokoro audio when weights are on disk, system TTS
+            // otherwise — either way this is the exact audio the dock heard.
+            val wav = KokoroVoice.synthesizeVoiceNote(
+                app, verdict.result, verdict.token?.packageCode, verdict.reasons,
+            )
+            if (wav != null) {
+                val queued = repo.uploadVoiceAlert(
+                    _selected.value, verdict.token?.packageCode,
+                    verdict.result, verdict.reasons, wav,
+                )
+                _voiceAlert.value = VoiceAlert(wav, caption, queued)
+            } else {
+                // No voice engine at all: the caption alone still pages the
+                // supervisor as text via the discrepancy queue on next sync.
+                _voiceAlert.value = null
+            }
         }
     }
 
@@ -120,6 +165,18 @@ class WarehouseViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _aiNote = MutableStateFlow<String?>(null)
     val aiNote: StateFlow<String?> = _aiNote.asStateFlow()
+
+    /** A tamper voice note waiting for the officer (share to Telegram / queued). */
+    data class VoiceAlert(
+        val file: java.io.File,
+        val caption: String,
+        val queued: Boolean,
+    )
+
+    private val _voiceAlert = MutableStateFlow<VoiceAlert?>(null)
+    val voiceAlert: StateFlow<VoiceAlert?> = _voiceAlert.asStateFlow()
+
+    fun clearVoiceAlert() { _voiceAlert.value = null }
 
     fun engineForAi(): VerificationEngine? = engine
 

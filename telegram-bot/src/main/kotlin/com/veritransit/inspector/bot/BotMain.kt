@@ -56,6 +56,18 @@ fun main(args: Array<String>) {
         // server maps to a user and a finance role before it acts on anything.
         actorFor = { it.fromUsername },
     )
+    // Tamper voice notes: the dock speaks first (Kokoro voice on the phone),
+    // the bot carries the exact audio to the supervisor chat as a voice
+    // message. Runs inside the poll loop — no extra thread, no extra state.
+    val supervisorChat = BotConfig.resolveSupervisorChat()
+    val voiceClient = BotConfig.resolvePlatformUrl()?.let {
+        PlatformClient(it, BotConfig.resolvePlatformToken())
+    }
+    if (voiceClient != null && supervisorChat != null) {
+        println("Voice alerts → supervisor chat $supervisorChat")
+    } else if (voiceClient != null) {
+        println("Voice alerts armed but no supervisor chat set (VERITRANSIT_SUPERVISOR_CHAT) — notes queue on the server.")
+    }
     println("Long-polling for questions and receipts… (Ctrl+C to stop)")
     while (true) {
         try {
@@ -69,9 +81,41 @@ fun main(args: Array<String>) {
                 val reply = handler.respond(message, documentText)
                 if (reply != null) client.sendMessage(message.chatId, reply)
             }
+            forwardVoiceAlerts(client, voiceClient, supervisorChat)
         } catch (e: Exception) {
             System.err.println("Poll/send failed: ${e.message} — retrying in 3s")
             Thread.sleep(3_000)
+        }
+    }
+}
+
+/**
+ * Forwards queued dock voice notes to the supervisor chat as Telegram voice
+ * messages, acking each one server-side so a restart neither loses nor
+ * double-sends an alert.
+ */
+private fun forwardVoiceAlerts(
+    client: TelegramClient,
+    platform: PlatformClient?,
+    supervisorChat: Long?,
+) {
+    if (platform == null || supervisorChat == null) return
+    val pending = kotlinx.coroutines.runBlocking { platform.pendingVoiceAlerts() }
+    for (alert in pending) {
+        try {
+            val audio = runCatching {
+                java.util.Base64.getDecoder().decode(alert.audioB64)
+            }.getOrNull()
+            if (audio == null || audio.isEmpty()) {
+                System.err.println("Voice alert ${alert.id}: bad audio, acking to drop poison")
+                kotlinx.coroutines.runBlocking { platform.ackVoiceAlert(alert.id, "") }
+                continue
+            }
+            val fileId = client.sendVoice(supervisorChat, audio, alert.caption)
+            kotlinx.coroutines.runBlocking { platform.ackVoiceAlert(alert.id, fileId) }
+            println("Voice alert ${alert.id} (${alert.verdict}) → chat $supervisorChat")
+        } catch (e: Exception) {
+            System.err.println("Voice alert ${alert.id} forward failed: ${e.message} — stays queued")
         }
     }
 }

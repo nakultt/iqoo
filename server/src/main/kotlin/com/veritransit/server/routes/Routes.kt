@@ -340,6 +340,29 @@ fun Application.apiRoutes(s: Services) {
 
             get("/webhooks/deliveries") { call.respond(s.webhooks.pending()) }
 
+            // ------------------------------------------------ tamper voice alerts
+            // Phone uploads the WAV it just spoke; the bot forwards it as a
+            // Telegram voice message to the supervisor chat (§6.4).
+            post("/alerts/voice") {
+                val upload = call.receive<VoiceAlertUpload>()
+                call.respond(HttpStatusCode.Created, mapOf(
+                    "id" to s.voiceAlerts.submit(upload, call.actor(s.sessions)),
+                ))
+            }
+
+            get("/alerts/voice/pending") {
+                call.respond(s.voiceAlerts.pending(
+                    call.request.queryParameters["limit"]?.toIntOrNull() ?: 20,
+                ))
+            }
+
+            post("/alerts/voice/{id}/delivered") {
+                val id = call.parameters["id"]!!
+                val fileId = call.request.queryParameters["tg_file_id"]
+                s.voiceAlerts.markDelivered(id, fileId, call.actor(s.sessions))
+                call.respond(mapOf("id" to id, "delivered" to true))
+            }
+
             webSocket("/live") {
                 liveSockets += this
                 try {

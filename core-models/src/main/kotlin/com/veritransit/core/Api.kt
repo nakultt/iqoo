@@ -208,6 +208,38 @@ data class PodCertificate(
     @SerialName("pdf_uri") val pdfUri: String? = null,
 )
 
+// ------------------------------------------------------- voice alerts
+
+/**
+ * A spoken tamper alert uploaded by the phone: the WAV the device's voice
+ * spoke on the dock, forwarded by the bot as a Telegram voice message.
+ * Audio travels base64 in JSON — voice notes are small (a few seconds of
+ * 16 kHz mono) and this keeps the §8.3 surface to one content type.
+ */
+@Serializable
+data class VoiceAlertUpload(
+    @SerialName("shipment_ref") val shipmentRef: String? = null,
+    @SerialName("package_code") val packageCode: String? = null,
+    val verdict: ScanResult,
+    val caption: String,
+    @SerialName("mime_type") val mimeType: String = "audio/wav",
+    @SerialName("audio_b64") val audioB64: String,
+    val officer: String? = null,
+)
+
+@Serializable
+data class VoiceAlertItem(
+    val id: String,
+    @SerialName("shipment_ref") val shipmentRef: String? = null,
+    @SerialName("package_code") val packageCode: String? = null,
+    val verdict: ScanResult,
+    val caption: String,
+    @SerialName("mime_type") val mimeType: String = "audio/wav",
+    @SerialName("audio_b64") val audioB64: String,
+    val officer: String? = null,
+    @SerialName("created_at") val createdAt: String? = null,
+)
+
 // ------------------------------------------------------- agent & audit
 
 @Serializable

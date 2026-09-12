@@ -159,6 +159,7 @@ fun PackageScanScreen(
     val context = LocalContext.current
     val verdict by vm.verdict.collectAsState()
     val aiNote by vm.aiNote.collectAsState()
+    val voiceAlert by vm.voiceAlert.collectAsState()
     val (done, total) = vm.accounted.collectAsState().value
 
     var hasCamera by remember {
@@ -203,6 +204,16 @@ fun PackageScanScreen(
                 aiNote = aiNote,
                 onAiCheck = v.token?.let { t -> { onAiCheck(t.packageCode) } },
                 onDismiss = { vm.clearVerdict() },
+            )
+        }
+
+        // Tamper voice note: the exact audio the dock just heard — one tap
+        // sends it to the supervisor Telegram chat (or it queues on sync).
+        voiceAlert?.let { alert ->
+            VoiceNoteBanner(
+                alert = alert,
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 220.dp),
+                onDismiss = { vm.clearVoiceAlert() },
             )
         }
 
@@ -309,6 +320,56 @@ private fun VerdictCard(
                 TextButton(onClick = onDismiss) {
                     Text("Next", color = Color.White, fontWeight = FontWeight.Bold)
                 }
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------- tamper voice note
+
+/**
+ * The dock just heard this; the supervisor reads it as a Telegram voice
+ * message. [alert.queued] means the server already holds it for bot
+ * forwarding — the share button covers the offline case in one tap.
+ */
+@Composable
+private fun VoiceNoteBanner(
+    alert: WarehouseViewModel.VoiceAlert,
+    modifier: Modifier = Modifier,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    Surface(
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+        shape = RoundedCornerShape(12.dp),
+        tonalElevation = 4.dp,
+        modifier = modifier.fillMaxWidth().padding(horizontal = 14.dp),
+    ) {
+        Column(Modifier.padding(14.dp)) {
+            Text(
+                if (alert.queued) "🔊 Voice note sent — supervisor Telegram will get it"
+                else "🔊 Voice note recorded — send it to the supervisor Telegram",
+                fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(alert.caption, style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = {
+                    val uri = androidx.core.content.FileProvider.getUriForFile(
+                        context, "${context.packageName}.files", alert.file,
+                    )
+                    val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                        type = "audio/wav"
+                        putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                        putExtra(android.content.Intent.EXTRA_TEXT, alert.caption)
+                        addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    context.startActivity(android.content.Intent.createChooser(send, "Send voice alert"))
+                }) { Text("Send to Telegram") }
+                TextButton(onClick = onDismiss) { Text("Dismiss") }
             }
         }
     }

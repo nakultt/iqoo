@@ -15,6 +15,7 @@ import com.veritransit.core.ScanEvent
 import com.veritransit.core.Shipment
 import com.veritransit.core.ShipmentDocument
 import com.veritransit.core.ShipmentReport
+import com.veritransit.core.VoiceAlertUpload
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.okhttp.OkHttp
@@ -120,6 +121,17 @@ class ApiClient(
 
     suspend fun documents(ref: String): List<ShipmentDocument> =
         client.get("$baseUrl/v1/shipments/$ref/documents").body()
+
+    /**
+     * Queues the dock's voice note for the supervisor Telegram chat. Best
+     * effort by contract: the WAV stays on the phone either way, so a failed
+     * upload degrades to the share-sheet path, never to a lost alert.
+     */
+    suspend fun uploadVoiceAlert(req: VoiceAlertUpload): String =
+        client.post("$baseUrl/v1/alerts/voice") {
+            contentType(ContentType.Application.Json)
+            setBody(req)
+        }.body()
 
     suspend fun submitPod(submission: PodSubmission): String =
         client.post("$baseUrl/v1/shipments/${submission.shipmentRef}/pod") {
