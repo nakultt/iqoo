@@ -94,4 +94,26 @@ class BundleContextTest {
         // not an accident.
         assertEquals(2048, BundleContext.parseContextSizeOrNull(configWith("\"2048\"")))
     }
+
+    @Test
+    fun `a declaration is adopted and attributed to the bundle`() {
+        assertEquals(4096 to true, BundleContext.applyDeclaration(declared = 4096))
+    }
+
+    @Test
+    fun `a declared default is still a declaration`() {
+        // The bundle declaring 2048 and the app assuming 2048 must not be
+        // indistinguishable in provenance.
+        assertEquals(2048 to true, BundleContext.applyDeclaration(declared = 2048))
+    }
+
+    @Test
+    fun `an unreadable config reverts to the default assumption`() {
+        // Not the previous bundle's window: once that bundle is gone (deleted
+        // or re-pulled), nothing on disk backs its claim.
+        assertEquals(
+            BundleContext.DEFAULT_CONTEXT_TOKENS to false,
+            BundleContext.applyDeclaration(declared = null),
+        )
+    }
 }

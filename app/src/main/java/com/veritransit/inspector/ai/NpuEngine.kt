@@ -405,6 +405,10 @@ object NpuEngine {
                 .onFailure { Log.w(TAG, "remove failed", it) }
             downloadPercent = 0
             downloadedBytes = 0L
+            // The window claim died with the bundle: back to the default
+            // assumption, or the screen keeps citing a config that is gone.
+            bundleContextTokens = BundleContext.DEFAULT_CONTEXT_TOKENS
+            contextFromBundle = false
             status = Status.NOT_DOWNLOADED
         }
     }
@@ -733,22 +737,24 @@ object NpuEngine {
 
     /**
      * Reads the downloaded bundle's own `genie_config.json` and adopts its
-     * declared context window. A no-op when the bundle dir is unknown or the
-     * config is unreadable — the previous (or default) value stays in force,
-     * because a missing signal must never shrink the budgets mid-shift.
+     * declared context window. When the dir is unknown or the config is
+     * unreadable — no bundle, a corrupt pull, a re-pull in flight — the state
+     * reverts to the default *assumption* with [contextFromBundle] down: the
+     * claim must always describe the bundle actually on disk, and a previous
+     * bundle's window no longer backs it once that bundle is gone.
      */
     fun refreshBundleContext(modelDir: String?) {
         val config = modelDir?.takeIf { it.isNotBlank() }
             ?.let { File(it, BundleContext.GENIE_CONFIG_NAME) }
             ?.takeIf { it.isFile }
             ?.let { runCatching { it.readText() }.getOrNull() }
-            ?: return
-        // A malformed config keeps the current tokens AND the provenance flag:
-        // an assumption must not start reporting itself as a bundle declaration.
-        val declared = BundleContext.parseContextSizeOrNull(config) ?: return
-        bundleContextTokens = declared
-        contextFromBundle = true
-        Log.i(TAG, "bundle context window: $declared tokens (from bundle config)")
+        val declared = config?.let { BundleContext.parseContextSizeOrNull(it) }
+        val (tokens, fromBundle) = BundleContext.applyDeclaration(declared)
+        if (tokens != bundleContextTokens || fromBundle != contextFromBundle) {
+            Log.i(TAG, "bundle context window: $tokens tokens (${if (fromBundle) "bundle config" else "default assumption"})")
+        }
+        bundleContextTokens = tokens
+        contextFromBundle = fromBundle
     }
 
     /** Aborts the in-flight generation; the coroutine unwinds via Completed. */
