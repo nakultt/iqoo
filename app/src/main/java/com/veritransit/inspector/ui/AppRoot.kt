@@ -216,6 +216,7 @@ fun AppRoot() {
                                 stack.add(Page.ResultActive)
                             },
                             onBack = { stack.removeAt(stack.lastIndex) },
+                            feedback = { msg -> feedback(msg, beep = true) },
                         )
                         Page.ResultActive -> {
                             val draft = flow.draftRecord(now)
@@ -280,6 +281,11 @@ fun AppRoot() {
                 onSelect = { t ->
                     if (t != tab) {
                         startInManualFlag = false
+                        // Receive always opens a fresh walkthrough, exactly like
+                        // Home's Start Receiving: a filed receipt's flow would
+                        // otherwise reopen already "LABEL LOCKED", with the
+                        // scanner ignoring every frame.
+                        if (t == Tab.SCAN) flow.startNew(false)
                         gotoTab(t)
                     }
                 },

@@ -21,7 +21,6 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -63,7 +62,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
@@ -91,6 +89,7 @@ import com.veritransit.inspector.ai.OpenRouterClient
 import com.veritransit.inspector.data.PackingList
 import com.veritransit.inspector.data.Presets
 import com.veritransit.inspector.data.QrLabel
+import com.veritransit.inspector.data.forLabel
 import com.veritransit.inspector.ui.ListSections
 import com.veritransit.inspector.ui.ReceivingFlowState
 import com.veritransit.inspector.ui.components.FieldLabel
@@ -103,7 +102,6 @@ import com.veritransit.inspector.ui.components.StepBadge
 import com.veritransit.inspector.ui.components.VTCard
 import com.veritransit.inspector.ui.theme.Mono
 import com.veritransit.inspector.ui.theme.VT
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @Composable
@@ -239,45 +237,73 @@ private fun Viewfinder(flow: ReceivingFlowState, onDetected: () -> Unit, feedbac
         cameraGranted = it
     }
 
-    // The live path needs both halves: a reachable model (NPU or the cloud
-    // fallback) and a camera to feed it. Without either, the frame stays the
-    // scripted demo scene.
-    val live = LlmGateway.isAvailable && cameraGranted
+    // The camera and the label decoder need no model: ML Kit reads the code on
+    // the handset. Only the full-document read ("capture & read") needs an AI
+    // backend, so that button alone waits on one. The scanner never does, and
+    // nothing locks this step on a timer or a tap.
+    val aiReady = LlmGateway.isAvailable && cameraGranted
     var reading by remember { mutableStateOf(false) }
     var readError by remember { mutableStateOf<String?>(null) }
 
-    // Real label decoding on the live frames, so the printed code locks the
-    // step on its own — the capture button stays for the full-document OCR
-    // read, which the label alone (often just the PO) cannot replace.
-    // The analyzer is bound while the scan segment is showing; the guards inside
-    // keep a stale frame from re-locking an already-resolved step.
+    /** Why the last decoded code did not lock the step; null when nothing was turned away. */
+    var scanHint by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(Unit) {
+        if (!cameraGranted) askCamera.launch(AndroidPermission.permission.CAMERA)
+    }
+
     // No format filter: the printed code on a carton label may be a QR or a
     // 1D barcode, and the default scanner covers every supported format.
     val scanner = remember { BarcodeScanning.getClient() }
     DisposableEffect(scanner) { onDispose { scanner.close() } }
 
-    fun onLabelScanned(payload: String) {
+    /**
+     * Locks the step only when a decoded code names a packing list this dock
+     * has. A PO the dock has no list for, or a code that is not a label at all,
+     * is reported under the frame and scanning carries on.
+     */
+    fun onLabelScanned(payloads: List<String>) {
         if (reading || flow.detected) return
-        val fields = QrLabel.parse(payload)
-        val p = Presets.DEFAULT
-        flow.packingList = PackingList(
-            purchaseOrderId = fields.purchaseOrderId ?: p.purchaseOrderId,
-            packingListId = fields.packingListId ?: p.packingListId,
-            supplier = p.supplier,
-            goods = p.goods,
-            dock = p.dock,
-            carrier = p.carrier,
-            items = p.items.map { it.copy(received = it.expected) },
-        )
-        // The label carries references, not the goods table — the receiver
-        // confirms the packed lines on the packing-list step, exactly as after
-        // a manual entry.
-        flow.poInput = fields.purchaseOrderId ?: ""
-        flow.packingListInput = fields.packingListId ?: ""
-        flow.listSections = null
-        flow.labelResolved = true
-        if (hapticsEnabled) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-        flow.detected = true
+        for (payload in payloads) {
+            val fields = QrLabel.parse(payload)
+            val preset = Presets.forLabel(fields)
+            if (preset == null) {
+                val ref = fields.purchaseOrderId ?: fields.packingListId
+                if (ref != null) {
+                    // Keep what the label did say, so Manual Entry opens pre-filled.
+                    fields.purchaseOrderId?.let { flow.poInput = it }
+                    fields.packingListId?.let { flow.packingListInput = it }
+                }
+                scanHint = if (ref != null) {
+                    "$ref has no packing list on this dock — check the label or use Manual Entry."
+                } else {
+                    "That code is not a packing-list label — scan the PO / PL code on the carton label."
+                }
+                continue
+            }
+            flow.packingList = PackingList(
+                purchaseOrderId = preset.purchaseOrderId,
+                packingListId = preset.packingListId,
+                supplier = preset.supplier,
+                goods = preset.goods,
+                dock = preset.dock,
+                carrier = preset.carrier,
+                items = preset.items.map { it.copy(received = it.expected) },
+            )
+            // The label carries references, not the goods table — the receiver
+            // confirms the packed lines on the packing-list step, exactly as after
+            // a manual entry.
+            flow.poInput = preset.purchaseOrderId
+            flow.packingListInput = preset.packingListId
+            flow.presetIndex = Presets.ALL.indexOf(preset)
+            flow.listSections = null
+            flow.listFromAi = false
+            flow.labelResolved = true
+            scanHint = null
+            if (hapticsEnabled) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+            flow.detected = true
+            return
+        }
     }
 
     val labelAnalyzer = remember(cameraGranted) {
@@ -293,8 +319,8 @@ private fun Viewfinder(flow: ReceivingFlowState, onDetected: () -> Unit, feedbac
                 val input = InputImage.fromMediaImage(mediaImage, proxy.imageInfo.rotationDegrees)
                 scanner.process(input)
                     .addOnSuccessListener { codes ->
-                        val payload = codes.firstOrNull()?.rawValue
-                        if (!payload.isNullOrBlank()) onLabelScanned(payload)
+                        val payloads = codes.mapNotNull { code -> code.rawValue?.takeIf { it.isNotBlank() } }
+                        if (payloads.isNotEmpty()) onLabelScanned(payloads)
                     }
                     .addOnCompleteListener { proxy.close() }
             }
@@ -329,6 +355,7 @@ private fun Viewfinder(flow: ReceivingFlowState, onDetected: () -> Unit, feedbac
                             reading.usable -> {
                                 flow.packingList = reading.toPackingList()
                                 flow.listFromAi = true
+                                flow.labelResolved = false
                                 flow.listSections = ListSections(
                                     header = reading.headerConfidence,
                                     supplier = reading.supplierConfidence,
@@ -348,13 +375,6 @@ private fun Viewfinder(flow: ReceivingFlowState, onDetected: () -> Unit, feedbac
         }
     }
 
-    LaunchedEffect(live) {
-        // Scripted resolve only on the demo path; the live path waits for a shot.
-        if (!live && !flow.detected) {
-            delay(3600)
-            flow.detected = true
-        }
-    }
     LaunchedEffect(flow.detected) {
         if (flow.detected) {
             feedback(
@@ -369,7 +389,7 @@ private fun Viewfinder(flow: ReceivingFlowState, onDetected: () -> Unit, feedbac
             onDetected()
         }
     }
-    LaunchedEffect(torch, camera.ready) { if (live) camera.setTorch(torch) }
+    LaunchedEffect(torch, camera.ready) { if (cameraGranted) camera.setTorch(torch) }
 
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Box(
@@ -377,46 +397,19 @@ private fun Viewfinder(flow: ReceivingFlowState, onDetected: () -> Unit, feedbac
                 .fillMaxWidth()
                 .aspectRatio(1.18f)
                 .clip(RoundedCornerShape(12.dp))
-                .background(Color(0xFF141A22))
-                .clickable(enabled = !live && !flow.detected) {
-                    flow.detected = true
-                    if (hapticsEnabled) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                },
+                .background(Color(0xFF141A22)),
         ) {
-            if (live) {
+            if (cameraGranted) {
                 EvidenceViewfinder(camera, Modifier.fillMaxSize(), analyzer = labelAnalyzer)
-            } else Canvas(Modifier.fillMaxSize()) {
-                val w = size.width
-                val h = size.height
-                drawRect(Brush.verticalGradient(listOf(Color(0xFF232B36), Color(0xFF161C25), Color(0xFF0F141B))))
-                drawRect(Color(0xFF1D242E), Offset(0f, h * 0.78f), Size(w, h * 0.22f))
-                drawRoundRect(Color(0xFF2A333F), Offset(w * 0.62f, h * 0.30f), Size(w * 0.30f, h * 0.34f), CornerRadius(10f))
-                drawRoundRect(Color(0xFF33404E), Offset(w * 0.64f, h * 0.36f), Size(w * 0.10f, h * 0.10f), CornerRadius(6f))
-                drawCircle(Color(0xFF0A0E13), radius = h * 0.055f, center = Offset(w * 0.70f, h * 0.66f))
-                drawCircle(Color(0xFF0A0E13), radius = h * 0.055f, center = Offset(w * 0.86f, h * 0.66f))
-                drawRoundRect(Color(0xFFEDEBE4), Offset(w * 0.12f, h * 0.18f), Size(w * 0.34f, h * 0.56f), CornerRadius(8f))
-                drawRect(Color(0xFFC9C4B8), Offset(w * 0.16f, h * 0.24f), Size(w * 0.26f, h * 0.02f))
-                drawRect(Color(0xFFC9C4B8), Offset(w * 0.16f, h * 0.30f), Size(w * 0.20f, h * 0.02f))
-                drawRoundRect(Color(0xFF1B222B), Offset(w * 0.17f, h * 0.40f), Size(w * 0.24f, w * 0.24f), CornerRadius(6f))
-                val cell = (w * 0.24f) / 7f
-                val qr = intArrayOf(
-                    1, 1, 1, 0, 1, 1, 1,
-                    1, 0, 1, 0, 1, 0, 1,
-                    1, 1, 0, 0, 0, 1, 1,
-                    0, 0, 1, 1, 0, 1, 0,
-                    1, 0, 1, 1, 0, 1, 1,
-                    1, 0, 1, 0, 1, 1, 1,
+            } else {
+                Text(
+                    "Camera off",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color(0xFFCFD8E3),
+                    modifier = Modifier.align(Alignment.Center),
                 )
-                qr.forEachIndexed { i, bit ->
-                    if (bit == 1) {
-                        val cx = w * 0.17f + (i % 7) * cell
-                        val cy = h * 0.40f + (i / 7) * cell
-                        drawRect(Color(0xFFE8E5DE), Offset(cx, cy), Size(cell * 0.86f, cell * 0.86f))
-                    }
-                }
-                if (torch) drawRect(Color(0x14FFFFFF), Offset.Zero, size)
             }
-            if (!flow.detected) {
+            if (cameraGranted && !flow.detected) {
                 val transition = rememberInfiniteTransition(label = "scan")
                 val y by transition.animateFloat(
                     initialValue = 0.06f,
@@ -443,20 +436,22 @@ private fun Viewfinder(flow: ReceivingFlowState, onDetected: () -> Unit, feedbac
                 Bracket(CornerQ.BL, Modifier.align(Alignment.BottomStart).size(34.dp))
                 Bracket(CornerQ.BR, Modifier.align(Alignment.BottomEnd).size(34.dp))
             }
-            Box(
-                Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(14.dp)
-                    .size(42.dp)
-                    .clip(CircleShape)
-                    .background(Color(0x66000000))
-                    .clickable {
-                        torch = !torch
-                        feedback(if (torch) "Assist light on" else "Assist light off")
-                    },
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(Icons.Rounded.Bolt, null, tint = if (torch) Color(0xFFFFD54F) else Color(0xFFCFD8E3), modifier = Modifier.size(22.dp))
+            if (cameraGranted) {
+                Box(
+                    Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(14.dp)
+                        .size(42.dp)
+                        .clip(CircleShape)
+                        .background(Color(0x66000000))
+                        .clickable {
+                            torch = !torch
+                            feedback(if (torch) "Assist light on" else "Assist light off")
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Rounded.Bolt, null, tint = if (torch) Color(0xFFFFD54F) else Color(0xFFCFD8E3), modifier = Modifier.size(22.dp))
+                }
             }
             androidx.compose.animation.AnimatedVisibility(flow.detected, enter = fadeIn(tween(180)), exit = fadeOut()) {
                 Box(Modifier.fillMaxSize().background(Color(0x2E059669)))
@@ -486,24 +481,36 @@ private fun Viewfinder(flow: ReceivingFlowState, onDetected: () -> Unit, feedbac
                 when {
                     reading -> "Reading document…"
                     flow.detected -> "Packing list captured"
-                    live -> "Hold the carton label in frame — or capture to read the list"
-                    else -> "Align the carton label within frame"
+                    !cameraGranted -> "Allow camera access to scan the carton label"
+                    camera.error != null -> "Camera unavailable — ${camera.error}"
+                    else -> "Point the camera at the QR or barcode on the carton label"
                 },
                 style = MaterialTheme.typography.bodyMedium,
                 color = VT.Slate,
                 textAlign = TextAlign.Center,
             )
-            if (!flow.detected && !live) {
+            val hint = scanHint
+            if (!flow.detected && hint != null) {
                 Text(
-                    "Demo build — tap the frame to capture instantly",
+                    hint,
                     style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Normal, fontSize = 10.5.sp),
-                    color = VT.Faint,
+                    color = VT.Amber,
+                    textAlign = TextAlign.Center,
                     modifier = Modifier.padding(top = 4.dp),
                 )
             }
         }
 
-        if (live) {
+        if (!cameraGranted) {
+            SecondaryButton(
+                "Allow camera to scan labels",
+                { askCamera.launch(AndroidPermission.permission.CAMERA) },
+                icon = Icons.Rounded.QrCodeScanner,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+
+        if (aiReady) {
             if (!NpuEngine.isReady) {
                 NoticeStrip(
                     if (LlmGateway.mode == LlmGateway.Mode.CLOUD) {
@@ -525,17 +532,6 @@ private fun Viewfinder(flow: ReceivingFlowState, onDetected: () -> Unit, feedbac
                 enabled = camera.ready && !reading,
                 icon = Icons.Rounded.QrCodeScanner,
             )
-        } else if (LlmGateway.isAvailable && !cameraGranted) {
-            SecondaryButton(
-                "Enable camera for live reading",
-                { askCamera.launch(AndroidPermission.permission.CAMERA) },
-                icon = Icons.Rounded.QrCodeScanner,
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
-
-        if (!LlmGateway.isAvailable) {
-            NoticeStrip("No AI backend — this is a scripted demo scene, not a live read.")
         }
         readError?.let { NoticeStrip(it) }
     }

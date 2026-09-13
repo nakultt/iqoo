@@ -2,8 +2,10 @@ package com.veritransit.inspector.ui.screens
 
 import android.Manifest as AndroidPermission
 import android.content.pm.PackageManager
+import android.os.SystemClock
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.ImageAnalysis
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -13,11 +15,10 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.scaleIn
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -36,12 +37,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.QrCodeScanner
 import androidx.compose.material.icons.rounded.Remove
 import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -51,23 +54,29 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.common.InputImage
 import com.veritransit.inspector.ai.EvidenceCamera
-import com.veritransit.inspector.ai.LlmGateway
 import com.veritransit.inspector.ai.EvidenceViewfinder
-import com.veritransit.inspector.ai.ReceivingAi
+import com.veritransit.inspector.ai.LlmGateway
 import com.veritransit.inspector.ai.NpuEngine
 import com.veritransit.inspector.ai.OpenRouterClient
+import com.veritransit.inspector.ai.ReceivingAi
+import com.veritransit.inspector.data.ItemScanTally
 import com.veritransit.inspector.data.ItemStatus
 import com.veritransit.inspector.data.PackingItem
 import com.veritransit.inspector.ui.ReceivingFlowState
@@ -75,8 +84,8 @@ import com.veritransit.inspector.ui.components.FlowHeader
 import com.veritransit.inspector.ui.components.FlowScaffold
 import com.veritransit.inspector.ui.components.NoticeStrip
 import com.veritransit.inspector.ui.components.PrimaryButton
-import com.veritransit.inspector.ui.components.SecondaryButton
 import com.veritransit.inspector.ui.components.PulseDot
+import com.veritransit.inspector.ui.components.SecondaryButton
 import com.veritransit.inspector.ui.components.StepBadge
 import com.veritransit.inspector.ui.components.VTCard
 import com.veritransit.inspector.ui.theme.Mono
@@ -89,13 +98,14 @@ fun DockCountScreen(
     flow: ReceivingFlowState,
     onCountComplete: () -> Unit,
     onBack: () -> Unit,
+    feedback: (String) -> Unit = {},
 ) {
     val packingList = flow.packingList
-    val total = flow.countedItems.size
-    val progress = if (total == 0) 0f else flow.scanProgress / total.toFloat()
-
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val haptics = LocalHapticFeedback.current
+    val hapticsEnabled = com.veritransit.inspector.ui.theme.LocalHapticsEnabled.current
+
     val camera = remember { EvidenceCamera() }
     var cameraGranted by remember {
         mutableStateOf(
@@ -106,15 +116,77 @@ fun DockCountScreen(
     val askCamera = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         cameraGranted = it
     }
-    val live = LlmGateway.isAvailable && cameraGranted && packingList != null
+    LaunchedEffect(Unit) {
+        if (!cameraGranted) askCamera.launch(AndroidPermission.permission.CAMERA)
+    }
+
+    // The receiver's own count: item codes the camera decodes, corrected by
+    // hand. It starts at nothing received — never pre-filled with the packed
+    // quantities, never a scripted scenario — and needs no model, so counting
+    // works with every AI backend off.
+    val tally = remember(packingList) {
+        ItemScanTally(packingList?.items ?: emptyList()).apply {
+            // Back from the result screen: pick the hand count up where it was left.
+            if (!flow.countedByAi) flow.countedItems.forEach { adjust(it.sku, it.received) }
+        }
+    }
+    var lines by remember(tally) { mutableStateOf(tally.lines) }
+    var lastScan by remember { mutableStateOf<String?>(null) }
+
     var counting by remember { mutableStateOf(false) }
     var countError by remember { mutableStateOf<String?>(null) }
 
-    /** Walks the counted lines in, one row at a time, then hands over. */
+    /** A model's photo count is on screen; the scan tally steps aside. */
+    val aiReveal = flow.countedByAi && flow.countedItems.isNotEmpty()
+
+    val scanner = remember { BarcodeScanning.getClient() }
+    DisposableEffect(scanner) { onDispose { scanner.close() } }
+
+    fun onItemCodes(payloads: List<String>) {
+        if (counting || flow.countedByAi) return
+        val now = SystemClock.elapsedRealtime()
+        for (payload in payloads) {
+            when (val outcome = tally.onCode(payload, now)) {
+                is ItemScanTally.Outcome.Counted -> {
+                    lines = tally.lines
+                    val line = outcome.line
+                    lastScan = "Counted ${line.sku} · ${line.name} — ${line.received} of ${line.expected}"
+                    if (hapticsEnabled) haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    feedback("${line.sku} · ${line.received}/${line.expected}")
+                }
+                is ItemScanTally.Outcome.NotOnList ->
+                    lastScan = "Not on this packing list: ${outcome.code.take(40)}"
+                ItemScanTally.Outcome.StillInView -> Unit
+            }
+        }
+    }
+
+    val itemAnalyzer = remember(cameraGranted, tally) {
+        if (!cameraGranted) {
+            null
+        } else {
+            ImageAnalysis.Analyzer { proxy ->
+                val mediaImage = proxy.image
+                if (mediaImage == null) {
+                    proxy.close()
+                    return@Analyzer
+                }
+                val input = InputImage.fromMediaImage(mediaImage, proxy.imageInfo.rotationDegrees)
+                scanner.process(input)
+                    .addOnSuccessListener { codes ->
+                        val payloads = codes.mapNotNull { code -> code.rawValue?.takeIf { it.isNotBlank() } }
+                        if (payloads.isNotEmpty()) onItemCodes(payloads)
+                    }
+                    .addOnCompleteListener { proxy.close() }
+            }
+        }
+    }
+
+    /** Walks a model count in, one row at a time, then hands over. */
     suspend fun revealAndFinish() {
         val target = flow.countedItems.size
         while (flow.scanProgress < target) {
-            delay(if (flow.countedByAi) 320 else 760)
+            delay(320)
             flow.scanProgress++
         }
         delay(820)
@@ -151,28 +223,46 @@ fun DockCountScreen(
         }
     }
 
-    LaunchedEffect(live) {
-        // The live path is receiver-driven: it waits for a photo of the delivery.
-        // The demo path keeps its scripted walk-through.
-        if (live) return@LaunchedEffect
-        if (flow.scanProgress == 0 && flow.countedItems.isEmpty()) {
-            delay(650)
-            flow.countedItems = flow.packingList?.let { l ->
-                com.veritransit.inspector.data.Repo.nextReceivingScenario(l)
-            } ?: emptyList()
-        }
-        revealAndFinish()
+    fun finishCount() {
+        if (packingList == null || counting) return
+        flow.countedItems = tally.lines
+        flow.scanProgress = flow.countedItems.size
+        flow.countedByAi = false
+        flow.countedBy = null
+        onCountComplete()
     }
 
-    FlowScaffold(bottomBar = null) {
+    val received = lines.sumOf { it.received }
+    val expected = lines.filter { it.expected > 0 }.sumOf { it.expected }
+
+    val bottomBar: (@Composable () -> Unit)? = when {
+        packingList == null -> null
+        aiReveal && flow.scanProgress < flow.countedItems.size -> null
+        aiReveal -> {
+            { PrimaryButton(text = "Continue to Receipt Result", onClick = onCountComplete) }
+        }
+        else -> {
+            {
+                PrimaryButton(
+                    text = "Finish Count ($received of $expected units)",
+                    onClick = ::finishCount,
+                    enabled = !counting,
+                )
+            }
+        }
+    }
+
+    FlowScaffold(bottomBar = bottomBar) {
         FlowHeader(
             title = "Receive / Count",
-            subtitle = "Dock count",
+            subtitle = packingList?.let { "PO ${it.purchaseOrderId}" } ?: "Dock count",
             onBack = onBack,
             trailing = { StepBadge(3) },
         )
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            if (live && flow.countedItems.isEmpty()) {
+            if (aiReveal) {
+                AiCountReveal(flow)
+            } else {
                 Box(
                     Modifier
                         .fillMaxWidth()
@@ -180,81 +270,170 @@ fun DockCountScreen(
                         .clip(RoundedCornerShape(12.dp))
                         .background(Color(0xFF141A22)),
                 ) {
-                    EvidenceViewfinder(camera, Modifier.fillMaxSize())
+                    if (cameraGranted && packingList != null) {
+                        EvidenceViewfinder(camera, Modifier.fillMaxSize(), analyzer = itemAnalyzer)
+                    } else {
+                        Text(
+                            if (packingList == null) "No packing list" else "Camera off",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Color(0xFFCFD8E3),
+                            modifier = Modifier.align(Alignment.Center),
+                        )
+                    }
                 }
-                if (!NpuEngine.isReady) {
-                    NoticeStrip(
-                        "The on-device model is not loaded — the dock photo will " +
-                            "be sent to ${OpenRouterClient.DISPLAY_NAME} on OpenRouter.",
-                    )
-                }
-                PrimaryButton(
-                    text = if (counting) "Counting…" else "Capture delivered goods",
-                    onClick = ::captureAndCount,
-                    enabled = camera.ready && !counting,
-                )
-                countError?.let { NoticeStrip(it) }
-            } else if (LlmGateway.isAvailable && !cameraGranted && flow.countedItems.isEmpty()) {
-                SecondaryButton(
-                    "Enable camera for live counting",
-                    { askCamera.launch(AndroidPermission.permission.CAMERA) },
+                Text(
+                    when {
+                        packingList == null -> "Go back and load a packing list first"
+                        !cameraGranted -> "Allow camera access to scan item codes — or count with + and −"
+                        camera.error != null -> "Camera unavailable — ${camera.error}"
+                        else -> lastScan ?: "Scan each item's barcode or QR — or count with + and −"
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = VT.Slate,
+                    textAlign = TextAlign.Center,
                     modifier = Modifier.fillMaxWidth(),
                 )
-            }
-            if (!LlmGateway.isAvailable && flow.countedItems.isEmpty()) {
-                NoticeStrip(
-                    "No AI backend — this step runs a scripted demo walkthrough, " +
-                        "not a live count.",
-                )
-            }
-            VTCard {
-                Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                    ProgressRing(progress, "${flow.scanProgress}", "$total")
-                    Spacer(Modifier.width(18.dp))
-                    Column {
-                        Text("Counting the delivery", style = MaterialTheme.typography.titleMedium, color = VT.Ink)
-                        Text(
-                            when {
-                                !flow.countedByAi -> "Count against the supplier's packing list"
-                                flow.countedBy == LlmGateway.Backend.CLOUD ->
-                                    "GLM-5.3-Flash vision count against the packing list"
-                                else -> "Qwen3-VL vision count against the packing list"
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = VT.Muted,
+                if (!cameraGranted) {
+                    SecondaryButton(
+                        "Allow camera to scan items",
+                        { askCamera.launch(AndroidPermission.permission.CAMERA) },
+                        icon = Icons.Rounded.QrCodeScanner,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                if (LlmGateway.isAvailable && cameraGranted && packingList != null) {
+                    if (!NpuEngine.isReady) {
+                        NoticeStrip(
+                            "The on-device model is not loaded — the dock photo will " +
+                                "be sent to ${OpenRouterClient.DISPLAY_NAME} on OpenRouter.",
                         )
-                        Spacer(Modifier.height(8.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                            PulseDot(VT.Azure, 7.dp)
-                            Text(
-                                when {
-                                    !flow.countedByAi -> "DOCK SCAN LIVE"
-                                    flow.countedBy == LlmGateway.Backend.CLOUD ->
-                                        "GLM-5.3-FLASH · CLOUD"
-                                    else -> "NPU · HTP0"
-                                },
-                                style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.SemiBold, fontSize = 10.5.sp, letterSpacing = 0.08.sp),
-                                color = VT.Azure,
-                            )
+                    }
+                    SecondaryButton(
+                        if (counting) "Counting…" else "Count from a photo instead",
+                        ::captureAndCount,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                countError?.let { NoticeStrip(it) }
+                VTCard {
+                    Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        ProgressRing(
+                            if (expected == 0) 0f else received / expected.toFloat(),
+                            "$received",
+                            "$expected",
+                        )
+                        Spacer(Modifier.width(18.dp))
+                        Column {
+                            Text("Counting the delivery", style = MaterialTheme.typography.titleMedium, color = VT.Ink)
+                            Text("Units received against the packing list", style = MaterialTheme.typography.bodySmall, color = VT.Muted)
                         }
                     }
                 }
-            }
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                flow.countedItems.take(flow.scanProgress).forEachIndexed { i, item ->
-                    CountRow(item, i)
-                }
-                if (!(live && flow.countedItems.isEmpty()) && (flow.scanProgress < total || total == 0)) {
-                    VTCard(border = true) {
-                        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                            CountingDot()
-                            Spacer(Modifier.width(12.dp))
-                            Text("Counting next line…", style = MaterialTheme.typography.bodyMedium, color = VT.Muted)
-                        }
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    lines.forEach { line ->
+                        TallyRow(
+                            line,
+                            onMinus = {
+                                tally.adjust(line.sku, -1)
+                                lines = tally.lines
+                            },
+                            onPlus = {
+                                tally.adjust(line.sku, +1)
+                                lines = tally.lines
+                            },
+                        )
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun AiCountReveal(flow: ReceivingFlowState) {
+    val total = flow.countedItems.size
+    val progress = if (total == 0) 0f else flow.scanProgress / total.toFloat()
+    val cloud = flow.countedBy == LlmGateway.Backend.CLOUD
+    VTCard {
+        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            ProgressRing(progress, "${flow.scanProgress}", "$total")
+            Spacer(Modifier.width(18.dp))
+            Column {
+                Text("Counting the delivery", style = MaterialTheme.typography.titleMedium, color = VT.Ink)
+                Text(
+                    if (cloud) "GLM-5.3-Flash vision count against the packing list"
+                    else "Qwen3-VL vision count against the packing list",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = VT.Muted,
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                    PulseDot(VT.Azure, 7.dp)
+                    Text(
+                        if (cloud) "GLM-5.3-FLASH · CLOUD" else "NPU · HTP0",
+                        style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.SemiBold, fontSize = 10.5.sp, letterSpacing = 0.08.sp),
+                        color = VT.Azure,
+                    )
+                }
+            }
+        }
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        flow.countedItems.take(flow.scanProgress).forEachIndexed { i, item ->
+            CountRow(item, i)
+        }
+        if (flow.scanProgress < total) {
+            VTCard(border = true) {
+                Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    CountingDot()
+                    Spacer(Modifier.width(12.dp))
+                    Text("Counting next line…", style = MaterialTheme.typography.bodyMedium, color = VT.Muted)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TallyRow(line: PackingItem, onMinus: () -> Unit, onPlus: () -> Unit) {
+    VTCard {
+        Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(line.name, style = MaterialTheme.typography.titleSmall, color = VT.Ink)
+                Text(
+                    if (line.sku.isNotBlank()) "${line.sku} · ${line.detail}" else line.detail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = VT.Muted,
+                )
+            }
+            StepButton(Icons.Rounded.Remove, "One fewer ${line.sku}", enabled = line.received > 0, onClick = onMinus)
+            Text(
+                "${line.received}/${line.expected}",
+                style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.SemiBold, fontSize = 14.sp),
+                color = when {
+                    line.received == line.expected -> VT.Emerald
+                    line.received > line.expected -> VT.Amber
+                    else -> VT.Ink
+                },
+                textAlign = TextAlign.Center,
+                modifier = Modifier.width(56.dp),
+            )
+            StepButton(Icons.Rounded.Add, "One more ${line.sku}", enabled = true, onClick = onPlus)
+        }
+    }
+}
+
+@Composable
+private fun StepButton(icon: ImageVector, description: String, enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .size(36.dp)
+            .clip(CircleShape)
+            .background(VT.Inset)
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(icon, description, tint = if (enabled) VT.Slate else VT.Faint, modifier = Modifier.size(18.dp))
     }
 }
 
