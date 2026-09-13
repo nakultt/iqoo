@@ -38,9 +38,16 @@ versus commercially customary, the clocks they start, and how far each rule's
 wording has been checked — is encoded as data in
 [`data/documents/`](app/src/main/java/com/veritransit/inspector/data/documents/)
 and written out in [docs/CONSIGNMENT_DOCUMENTS.md](docs/CONSIGNMENT_DOCUMENTS.md)
-(first cut of #27, Tamil Nadu scope). It is reference data for the receiving
-team, within the non-goal above: the app does not verify these documents or
-state a legal position.
+(first cut of #27, Tamil Nadu scope).
+
+The registry is resolved live on a receipt's **Paperwork** screen (from Receipt
+Result, before or after filing): the receipt pre-fills the goods family its own
+words name and the count's discrepancy finding, the receiver answers the rest —
+goods family, inter-State, r.138(1) value, mode, e-invoicing status — and any
+fact left unanswered surfaces as "cannot tell yet", never as "not required".
+Each requirement carries its verification mark and the open gaps that could
+change it. It is reference data for the receiving team, within the non-goal
+above: the app does not verify these documents or state a legal position.
 
 > [!IMPORTANT]
 > **QR ingestion yields headers only — never line items.** The carton-label scan

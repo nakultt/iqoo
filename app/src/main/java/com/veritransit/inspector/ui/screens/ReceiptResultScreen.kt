@@ -36,6 +36,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.FactCheck
 import androidx.compose.material.icons.rounded.HistoryEdu
 import androidx.compose.material.icons.rounded.Print
 import androidx.compose.material.icons.rounded.Refresh
@@ -91,6 +92,7 @@ fun ReceiptResultScreen(
     onRecount: (() -> Unit)?,
     onPrint: () -> Unit,
     onBack: () -> Unit,
+    onPaperwork: (() -> Unit)? = null,
 ) {
     var action by remember(record.id) {
         mutableStateOf(flow?.action ?: if (record.flagged) ReceivingAction.RECOUNT else ReceivingAction.ACCEPT)
@@ -142,10 +144,16 @@ fun ReceiptResultScreen(
                             SecondaryButton("Re-count Delivery", onRecount ?: {}, icon = Icons.Rounded.Refresh, modifier = Modifier.weight(1f))
                             SecondaryButton("Add Note", { showNote = true }, icon = Icons.Rounded.Edit, modifier = Modifier.weight(1f))
                         }
+                        if (onPaperwork != null) {
+                            SecondaryButton("Paperwork Checklist", onPaperwork, icon = Icons.Rounded.FactCheck, modifier = Modifier.fillMaxWidth())
+                        }
                     }
                 } else {
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         SecondaryButton("Print Summary", onPrint, icon = Icons.Rounded.Print, modifier = Modifier.weight(1f))
+                        if (onPaperwork != null) {
+                            SecondaryButton("Paperwork", onPaperwork, icon = Icons.Rounded.FactCheck, modifier = Modifier.weight(1f))
+                        }
                     }
                 }
             }

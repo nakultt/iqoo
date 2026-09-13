@@ -58,6 +58,7 @@ import com.veritransit.inspector.data.DashboardSync
 import com.veritransit.inspector.data.ItemStatus
 import com.veritransit.inspector.data.ReceiptOutcome
 import com.veritransit.inspector.data.ReceivingAction
+import com.veritransit.inspector.data.ReceivingRecord
 import com.veritransit.inspector.data.Repo
 import com.veritransit.inspector.ui.components.ToastBar
 import com.veritransit.inspector.ui.screens.DockCountScreen
@@ -66,6 +67,7 @@ import com.veritransit.inspector.ui.screens.HomeScreen
 import com.veritransit.inspector.ui.screens.ChatScreen
 import com.veritransit.inspector.ui.screens.PackingListScreen
 import com.veritransit.inspector.ui.screens.NpuScreen
+import com.veritransit.inspector.ui.screens.PaperworkScreen
 import com.veritransit.inspector.ui.screens.ReceiptsScreen
 import com.veritransit.inspector.ui.screens.ReceiptResultScreen
 import com.veritransit.inspector.ui.screens.ScanScreen
@@ -87,6 +89,7 @@ private sealed interface Page {
     data object DockCount : Page
     data object ResultActive : Page
     data class ResultView(val recordId: String) : Page
+    data class Paperwork(val record: ReceivingRecord) : Page
     data object NpuModel : Page
     data object Chat : Page
 }
@@ -252,6 +255,7 @@ fun AppRoot() {
                                 },
                                 onPrint = { feedback("Summary queued for the dock printer") },
                                 onBack = { stack.removeAt(stack.lastIndex) },
+                                onPaperwork = { stack.add(Page.Paperwork(draft)) },
                             )
                         }
                         is Page.ResultView -> {
@@ -266,9 +270,14 @@ fun AppRoot() {
                                     onRecount = null,
                                     onPrint = { feedback("Summary queued for the dock printer") },
                                     onBack = { stack.removeAt(stack.lastIndex) },
+                                    onPaperwork = { stack.add(Page.Paperwork(record)) },
                                 )
                             }
                         }
+                        is Page.Paperwork -> PaperworkScreen(
+                            record = page.record,
+                            onBack = { stack.removeAt(stack.lastIndex) },
+                        )
                     }
                 }
             }
