@@ -64,6 +64,15 @@ object Presets {
                 PackingItem("TXT-7730", "Bobbin Spindle Set", "Crate L-2", 10, 10),
             ),
         ),
+        PackingListPreset(
+            goods = "Fresh Produce (Red Apples)", short = "Produce",
+            purchaseOrderId = "PO-2026-4534", packingListId = "PL-2026-4534-A",
+            supplier = "Himachal Orchards LLP", dock = "Dock 5 · Produce Bay",
+            carrier = "Snowman Cold Chain",
+            items = listOf(
+                PackingItem("PRD-8101", "Red Apples Grade A (72-80 mm)", "Cold-chain Crate • 10 kg", 120, 120),
+            ),
+        ),
     )
 
     val DEFAULT = ALL.first()
