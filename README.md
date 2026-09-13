@@ -153,7 +153,10 @@ never committed).
 ## Back-office dashboard
 
 [dashboard/](dashboard/) is a JDK-only web service for the office side: the
-receipts board, per-receipt deterministic PDF reports, and `POST /api/records`
+receipts board, per-receipt deterministic PDF reports, a per-receipt
+**paperwork page** (the consignment document registry resolved live — legally
+required vs. commercially customary, deadlines, and the insurance-and-claim
+documents when the dock found goods short or damaged), and `POST /api/records`
 for the app's handoff. An accepted delivery shows **OK TO PAY**; a flagged one
 holds the delivery and the payment.
 
