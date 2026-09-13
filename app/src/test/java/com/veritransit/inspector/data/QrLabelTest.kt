@@ -41,6 +41,15 @@ class QrLabelTest {
     }
 
     @Test
+    fun `the apples consignment qr payload yields its references`() {
+        // Byte-for-byte the payload encoded in apples-qr.png at the repo root:
+        // the scanner finds the PO/PL tokens wherever they sit in the string.
+        val fields = QrLabel.parse(APPLES_QR_PAYLOAD)
+        assertEquals("PO-2026-4534", fields.purchaseOrderId)
+        assertEquals("PL-2026-4534-A", fields.packingListId)
+    }
+
+    @Test
     fun `a label carrying both references reads both`() {
         val fields = QrLabel.parse("SUPPLIER BRIGHT  PO-2025-4471  PL-2025-4471-A  CARTON 4/9")
         assertEquals("PO-2025-4471", fields.purchaseOrderId)
