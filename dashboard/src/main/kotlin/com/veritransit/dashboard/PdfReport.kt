@@ -14,9 +14,10 @@ import java.util.Locale
  * embedding):
  *   page 1 — record fields, receipt status, packing-list lines with per-line
  *            packed/received, receiver remarks;
- *   page 2 — the evidence frames captured at the dock (the packing list and the
- *            delivered goods, embedded as DCTDecode JPEG XObjects) and a vector
- *            bar chart of packed-vs-received per item.
+ *   page 2 — the picture row (the goods family's frozen reference photograph
+ *            first, then the evidence frames captured at the dock, embedded as
+ *            DCTDecode JPEG XObjects) and a vector bar chart of
+ *            packed-vs-received per item.
  *
  * Charts are drawn as plain path/paint operators, and photographs as raw JPEG
  * passes-through, so determinism costs nothing: every byte in the file is a
@@ -46,6 +47,13 @@ object PdfReport {
 
     fun render(r: ReceivingRecord): ByteArray {
         val images = buildList {
+            // The goods family's frozen reference photograph leads the picture
+            // row: a report carries a picture of what the goods are even when
+            // the dock captured no frames. Committed asset, not a fetch — the
+            // document stays a fixed function of the record.
+            GoodsImage.of(r).bytes()?.let {
+                add(EvidenceImage("Goods family - reference illustration (not the consignment)", it))
+            }
             r.listEvidence?.let { add(EvidenceImage("Packing list frame", it)) }
             r.dockEvidence?.let { add(EvidenceImage("Delivered goods frame", it)) }
         }
@@ -112,21 +120,31 @@ object PdfReport {
         header(out, "EVIDENCE & COUNT", r.id)
 
         var y = PAGE_H - 110f
-        text(out, y, "PROOF FRAMES CAPTURED AT THE DOCK", bold = true)
+        text(out, y, "PICTURES — GOODS FAMILY, THEN THE FRAMES CAPTURED AT THE DOCK", bold = true)
         y -= 12f
 
         if (images.isEmpty()) {
-            text(out, y - 80f, "No evidence frames were captured for this record.", rgb = MUTED)
+            text(out, y - 80f, "No pictures available for this record.", rgb = MUTED)
             y -= 120f
         } else {
-            // Square frames side by side; the dock camera emits 512x512.
-            val size = 200f
+            // Aspect-correct tiles on one row, bottom-aligned: the goods family's
+            // reference photograph first, then the dock's own frames. Three tiles
+            // at 145pt fit the text column; fewer tiles get the wider box.
+            val box = if (images.size >= 3) 145f else 200f
             images.forEachIndexed { index, img ->
-                val x = MARGIN + index * (size + 22f)
-                out.append(drawImageOp("Im${index + 1}", x, y - size, size, size))
-                text(out, y - size - 12f, img.caption, size = 8, rgb = MUTED, x = x)
+                val (iw, ih) = jpegSize(img.jpeg) ?: (512 to 512)
+                val scale = box / maxOf(iw, ih)
+                val w = iw * scale
+                val h = ih * scale
+                val x = MARGIN + index * (box + 22f)
+                out.append(drawImageOp("Im${index + 1}", x, y - h, w, h))
+                text(out, y - box - 12f, clip(img.caption, 40), size = 8, rgb = MUTED, x = x)
             }
-            y -= size + 34f
+            y -= box + 34f
+            if (r.listEvidence == null && r.dockEvidence == null) {
+                text(out, y, "No dock evidence frames were captured for this record - the picture above is a goods-family reference.", size = 8, rgb = MUTED)
+                y -= 14f
+            }
         }
 
         rule(out, y)

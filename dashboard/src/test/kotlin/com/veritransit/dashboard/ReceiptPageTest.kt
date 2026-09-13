@@ -62,4 +62,22 @@ class ReceiptPageTest {
         assertTrue(html.contains("Sahyadri Foods LLP"))
         assertTrue(!html.contains("&amp; beyond"))
     }
+
+    @Test
+    fun `the page shows the goods picture and the receipt's own count`() {
+        val html = Pages.receiptPage(flagged(), ConsignmentFacts.fromRecord(flagged()), now)
+        assertTrue(html.contains("The count on this receipt"), "the line-items digest is missing")
+        assertTrue(html.contains("/img/report-electronics.jpg"), "the goods picture is missing")
+        assertTrue(html.contains("reference picture, not the consignment"), "the picture must be labelled as illustrative")
+        assertTrue(html.contains("ELC-3305"), "the receipt's own lines are missing")
+        assertTrue(html.contains(">SHORT<"), "the per-line status is missing")
+        assertTrue(html.contains("2 discrepancies") || html.contains("1 discrepancy"), "the discrepancy tally is missing")
+    }
+
+    @Test
+    fun `required documents carry an operational checklist`() {
+        val html = Pages.receiptPage(flagged(), ConsignmentFacts.fromRecord(flagged(), mapOf("submitted" to "1", "inter" to "true", "declared" to "240000")), now)
+        assertTrue(html.contains("When you hold it, check"), "the checklist block is missing")
+        assertTrue(html.contains("vehicle number filled"), "the e-way Part B check is missing")
+    }
 }

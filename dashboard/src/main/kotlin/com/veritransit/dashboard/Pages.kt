@@ -1,5 +1,6 @@
 package com.veritransit.dashboard
 
+import com.veritransit.dashboard.documents.ConsignmentDocument
 import com.veritransit.dashboard.documents.ConsignmentFacts
 import com.veritransit.dashboard.documents.ConsignmentPaperwork
 import com.veritransit.dashboard.documents.DocumentRegistry
@@ -222,6 +223,7 @@ $rows
         val claimCard = receiptPageClaim(record, facts, paperwork)
         val factForm = receiptPageForm(record, facts)
         val resolution = receiptPageResolution(paperwork)
+        val digest = receiptPageDigest(record)
         val state = ShipState.of(record.outcome)
         val (stateClass, paymentBadge) = when (state) {
             ShipState.SHIPPED -> "shipped" to "OK TO PAY"
@@ -301,6 +303,23 @@ $rows
   button.resolve { margin-top:14px; background:var(--primary); color:#fff; border:0; border-radius:6px;
                    padding:10px 18px; font:600 14px 'Hanken Grotesk',sans-serif; cursor:pointer; }
   button.resolve:hover { background:#5C001D; }
+  .digest { display:flex; gap:18px; background:var(--surface); border:1px solid var(--hairline);
+            border-radius:10px; padding:14px; align-items:flex-start; flex-wrap:wrap; }
+  .goodsfig { margin:0; width:220px; }
+  .goodsfig img { width:100%; border-radius:8px; border:1px solid var(--hairline); display:block; }
+  .goodsfig figcaption { font-family:var(--mono); font-size:10px; color:var(--faint); margin-top:6px; }
+  .digestinfo { flex:1; min-width:300px; }
+  table.lines { width:100%; border-collapse:collapse; font-size:13px; }
+  table.lines th { font-family:var(--mono); font-size:10px; letter-spacing:.06em; color:var(--muted);
+                   text-transform:uppercase; text-align:left; padding:6px 8px; border-bottom:1px solid var(--hairline); }
+  table.lines td { padding:6px 8px; border-bottom:1px solid var(--inset); color:var(--slate); }
+  table.lines td.num, table.lines th.num { text-align:right; font-family:var(--mono); }
+  table.lines td.mono { font-family:var(--mono); font-size:12px; }
+  table.lines .m { color:var(--muted); font-size:12px; }
+  .state.bad { color:var(--crimson); background:var(--crimson-bg); border-color:var(--crimson-line); }
+  .check { margin-top:8px; background:var(--inset); border-radius:6px; padding:8px 10px;
+           font-size:12.5px; color:var(--slate); }
+  .check .c { color:var(--muted); font-family:var(--mono); font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; }
   a.pdf { font-family:var(--mono); font-size:12px; color:var(--primary); text-decoration:none;
           border:1px solid var(--hairline); border-radius:5px; padding:6px 10px; background:var(--inset); }
   a.pdf:hover { background:var(--amber-bg); }
@@ -316,6 +335,7 @@ $rows
   </h1>
   <p style="margin:4px 0 0;color:var(--muted)">${esc(record.supplier)} — ${esc(record.goods)} ·
      ${esc(record.purchaseOrderId)} · ${esc(record.packingListId)} · ${esc(record.dock)}${if (record.carrier.isNotBlank()) " · " + esc(record.carrier) else ""}</p>
+$digest
 $claimCard
 $factForm
 $resolution
@@ -326,6 +346,41 @@ $resolution
 </body>
 </html>
 """
+    }
+
+    /** The receipt's own picture and count: the goods figure beside the line table. */
+    private fun receiptPageDigest(record: ReceivingRecord): String {
+        val img = GoodsImage.of(record)
+        val rows = record.items.joinToString("\n") { item ->
+            val (cls, label) = when (item.status) {
+                ItemStatus.MATCHED -> "req" to "MATCH"
+                ItemStatus.OVER -> "undet" to "OVER"
+                ItemStatus.UNLISTED, ItemStatus.DAMAGED -> "bad" to item.status.name
+                ItemStatus.SHORT -> "undet" to "SHORT"
+            }
+            "<tr><td class=\"mono\">${esc(item.sku)}</td><td>${esc(item.name)}${if (item.detail.isNotBlank()) " <span class=\"m\">· ${esc(item.detail)}</span>" else ""}</td>" +
+                "<td class=\"num\">${item.expected}</td><td class=\"num\">${item.received}</td><td class=\"num\">${item.damaged}</td>" +
+                "<td><span class=\"state $cls\">$label</span></td></tr>"
+        }
+        val conf = if (record.confidence > 0f) " · model confidence ${PdfReport.pct(record.confidence)}" else ""
+        return """
+  <section>
+    <div class="digest">
+      <figure class="goodsfig">
+        <img src="/img/report-${img.name.lowercase()}.jpg" alt="Goods family illustration">
+        <figcaption>${esc(img.label)} — reference picture, not the consignment.
+        The dock's own evidence frames live in the <a class="pdf" href="${pdfHref(record.id)}">PDF report</a>.</figcaption>
+      </figure>
+      <div class="digestinfo">
+        <h2>The count on this receipt</h2>
+        <table class="lines">
+          <tr><th>SKU</th><th>Line</th><th style="text-align:right">Packed</th><th style="text-align:right">Received</th><th style="text-align:right">Damaged</th><th>Status</th></tr>
+          $rows
+        </table>
+        <div class="m" style="margin-top:6px">${record.discrepancyCount} ${if (record.discrepancyCount == 1) "discrepancy" else "discrepancies"} across ${record.items.size} lines$conf</div>
+      </div>
+    </div>
+  </section>"""
     }
 
     private fun receiptPageClaim(record: ReceivingRecord, facts: ConsignmentFacts, paperwork: Paperwork?): String {
@@ -372,6 +427,10 @@ $rows
         val deadline = req.deadline?.let { "<div class=\"m\">&#9201; ${esc(it.label)}</div>" } ?: ""
         val note = if (req.note.isNullOrBlank()) "" else "<div class=\"m\">${esc(req.note)}</div>"
         val provision = req.provision?.let { "<div class=\"c\">${esc(it.cite)} — ${esc(it.substance)}</div>" } ?: ""
+        val checks = docChecklist(req.document)
+        val checkHtml = if (checks.isEmpty()) "" else
+            "<div class=\"check\"><div class=\"c\" style=\"margin-bottom:2px\">When you hold it, check:</div>" +
+                checks.joinToString("") { "<div>&#9744; ${esc(it)}</div>" } + "</div>"
         return """
       <div class="doc">
         <div class="t"><span>${esc(req.document.title)} <span class="m">· ${esc(req.holder.label)} ${esc(req.duty.verb)}</span></span>
@@ -380,7 +439,65 @@ $rows
         $provision
         $deadline
         $note
+        $checkHtml
       </div>"""
+    }
+
+    /**
+     * What the receiving team actually verifies on each paper, once it is in
+     * hand — the page's answer to "and then what?". Deliberately operational,
+     * not legal advice: every line is a match-or-mismatch a dock can check.
+     */
+    private fun docChecklist(doc: ConsignmentDocument): List<String> = when (doc) {
+        ConsignmentDocument.TAX_INVOICE -> listOf(
+            "PO ↔ invoice ↔ goods-received note: same SKUs, same quantities, same values",
+            "Supplier GSTIN, and the r.48(1) copy marking on the copy you were given",
+            "E-invoice case: the IRN is present and still verifiable on the portal",
+        )
+        ConsignmentDocument.DELIVERY_CHALLAN -> listOf(
+            "r.55(1) particulars: recipient, destination, consignment value",
+            "Triplicate copies — ORIGINAL FOR CONSIGNEE, DUPLICATE FOR TRANSPORTER, TRIPLICATE",
+            "Job-work movement: the principal's challan, never an invoice",
+        )
+        ConsignmentDocument.EWAY_BILL -> listOf(
+            "Part A: supplier, recipient, and a value that matches the invoice",
+            "Part B: vehicle number filled — invalid by road without it (r.138(3) Expl. 2)",
+            "Validity: distance against the days the bill has left",
+        )
+        ConsignmentDocument.BILL_OF_ENTRY -> listOf(
+            "Number and date go into Part A of the e-way bill",
+            "Matches the import paperwork for this consignment",
+        )
+        ConsignmentDocument.LORRY_RECEIPT -> listOf(
+            "Carrier signature and the condition noted at handover",
+            "Keep the original — it anchors any claim against the carrier",
+        )
+        ConsignmentDocument.ITC_04 -> listOf(
+            "Challans grouped into the right half-year (above ₹5 crore turnover)",
+            "Furnished by the 25th of the month after the period (r.45(3))",
+        )
+        ConsignmentDocument.CREDIT_NOTE -> listOf(
+            "References the original invoice it corrects",
+            "Declared by the s.34(2) cutoff — 30 November after the FY, or the annual return",
+        )
+        ConsignmentDocument.CARRIER_NOTICE -> listOf(
+            "In writing, served on the carrier — before any suit",
+            "The booked date anchors the 180 days, not the delivery date",
+            "Keep proof of service",
+        )
+        ConsignmentDocument.RECORDS -> listOf(
+            "Retain 72 months from the annual return's due date (s.36)",
+        )
+        ConsignmentDocument.PURCHASE_ORDER -> listOf(
+            "It anchors the PO ↔ invoice ↔ GRN three-way match",
+        )
+        ConsignmentDocument.PACKING_LIST -> listOf(
+            "Carton-by-carton what the supplier packed",
+            "The dock count reconciles against exactly this",
+        )
+        ConsignmentDocument.GOODS_RECEIVED_NOTE -> listOf(
+            "Signed 'subject to inspection' until the count is done",
+        )
     }
 
     private fun receiptPageForm(record: ReceivingRecord, facts: ConsignmentFacts): String {

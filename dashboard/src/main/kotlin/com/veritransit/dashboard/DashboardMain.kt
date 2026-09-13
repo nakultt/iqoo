@@ -3,6 +3,7 @@ package com.veritransit.dashboard
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import com.veritransit.dashboard.documents.ConsignmentFacts
+import com.veritransit.dashboard.GoodsImage
 import kotlinx.serialization.json.Json
 import java.net.InetSocketAddress
 import java.net.URLDecoder
@@ -65,6 +66,20 @@ object DashboardMain {
                     // unanswered fact stays unknown for the resolver.
                     val facts = ConsignmentFacts.fromRecord(record, queryParams(exchange))
                     respond(exchange, 200, Pages.receiptPage(record, facts, Instant.now()).toByteArray(), "text/html; charset=utf-8")
+                }
+            }
+
+            path.startsWith("/img/") -> {
+                // Frozen goods-family photographs, committed under resources —
+                // never fetched at request time, so nothing here varies.
+                val name = path.removePrefix("/img/").removeSuffix(".jpg").removePrefix("report-")
+                val bytes = GoodsImage.entries
+                    .firstOrNull { it.name.equals(name, ignoreCase = true) }
+                    ?.bytes()
+                if (bytes == null) {
+                    respond(exchange, 404, "No such picture\n".toByteArray(), "text/plain")
+                } else {
+                    respond(exchange, 200, bytes, "image/jpeg")
                 }
             }
 

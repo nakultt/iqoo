@@ -27,12 +27,13 @@ class PdfReportTest {
         note: String = "",
         list: ByteArray? = null,
         dock: ByteArray? = null,
+        goods: String = "Industrial Hardware (Fasteners/Plates)",
     ) = ReceivingRecord(
         id = id,
         purchaseOrderId = "PO-2025-4488",
         packingListId = "PL-2025-4488-A",
         supplier = "Deccan Fasteners & Steel",
-        goods = "Industrial Hardware (Fasteners/Plates)",
+        goods = goods,
         dock = "Dock 1 · Plant Store",
         carrier = "TCI Freight",
         outcome = outcome,
@@ -88,14 +89,37 @@ class PdfReportTest {
         assertTrue(text.contains("/Filter /DCTDecode"))
         assertTrue(text.contains("/Width 2"))
         assertTrue(text.contains("/Height 3"))
+        // Im1 is the goods-family illustration, Im2 the dock's own frame.
         assertTrue(text.contains("/Im1 Do"))
+        assertTrue(text.contains("/Im2 Do"))
     }
 
     @Test
-    fun `a record without frames renders no image objects`() {
+    fun `a record without frames still carries the goods picture and says so`() {
         val text = PdfReport.render(record()).toString(Charsets.ISO_8859_1)
-        assertTrue(!text.contains("/Subtype /Image"))
-        assertTrue(text.contains("No evidence frames were captured"))
+        assertTrue(text.contains("/Subtype /Image"), "the goods illustration is missing")
+        assertTrue(text.contains("/Im1 Do"))
+        assertTrue(text.contains("Goods family - reference illustration"))
+        assertTrue(text.contains("No dock evidence frames were captured"))
+        assertTrue(!text.contains("/Im2 Do"), "only the illustration should be embedded")
+    }
+
+    @Test
+    fun `the goods illustration is the frozen asset, embedded verbatim`() {
+        val bytes = GoodsImage.ELECTRONICS.bytes()
+        val text = PdfReport.render(record(goods = "Consumer Electronics (Smartphones/Tabs)"))
+            .toString(Charsets.ISO_8859_1)
+        assertTrue(bytes != null && text.contains(bytes.toString(Charsets.ISO_8859_1)), "embedded bytes differ from the frozen asset")
+    }
+
+    @Test
+    fun `the goods picture follows the receipt's own words`() {
+        assertEquals(GoodsImage.ELECTRONICS, GoodsImage.of("Bright Electronics Pvt Ltd", "Consumer Electronics (Smartphones/Tabs)"))
+        assertEquals(GoodsImage.FABRIC, GoodsImage.of("Lakshmi Textile Works", "Textile Machinery & Spares"))
+        assertEquals(GoodsImage.HARDWARE, GoodsImage.of("AutoLink Components", "Auto Spare Parts (Assemblies)"))
+        assertEquals(GoodsImage.HARDWARE, GoodsImage.of("Deccan Fasteners & Steel", "Industrial Hardware (Fasteners/Plates)"))
+        assertEquals(GoodsImage.FOOD, GoodsImage.of("Sahyadri Foods LLP", "Packaged Foodstuffs (Dry Cereals)"))
+        assertEquals(GoodsImage.WAREHOUSE, GoodsImage.of("Unknown Supplier", "Mystery goods"))
     }
 
     @Test
