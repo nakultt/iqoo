@@ -16,7 +16,10 @@ object Pages {
     private fun esc(s: String): String = s
         .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
 
-    private fun pdfHref(id: String): String =
+    private fun pdfHref(id: String): String = reportUrl(id)
+
+    /** `GET /report/<id>.pdf` for one receipt, id url-encoded. */
+    fun reportUrl(id: String): String =
         "/report/" + URLEncoder.encode(id, StandardCharsets.UTF_8) + ".pdf"
 
     fun dashboard(vault: Vault, now: Instant): String {
@@ -72,10 +75,21 @@ object Pages {
   .badge.wait { color:var(--faint); background:var(--inset); border-color:var(--hairline); }
   .badge.pay-ok { color:#fff; background:var(--emerald); border-color:var(--emerald); }
   .badge.pay-no { color:var(--amber); background:var(--amber-bg); border-color:var(--amber-line); }
-  a.pdf { font-family:var(--mono); font-size:12px; color:var(--primary); text-decoration:none;
+  a.pdf, button.pdf { font-family:var(--mono); font-size:12px; color:var(--primary); text-decoration:none;
           border:1px solid var(--hairline); border-radius:5px; padding:6px 10px; background:var(--inset);
           white-space:nowrap; }
-  a.pdf:hover { background:var(--amber-bg); }
+  a.pdf:hover, button.pdf:hover { background:var(--amber-bg); }
+  button.pdf { cursor:pointer; }
+  .acts { display:inline-flex; gap:8px; align-items:center; }
+  dialog#report { width:min(920px, 94vw); max-width:94vw; padding:0; border:1px solid var(--hairline);
+          border-radius:10px; background:var(--alabaster); color:var(--ink); }
+  dialog#report::backdrop { background:rgba(15,23,42,.45); }
+  dialog#report .bar { display:flex; align-items:center; gap:12px; padding:10px 14px;
+          border-bottom:1px solid var(--hairline); background:var(--surface);
+          border-radius:10px 10px 0 0; }
+  dialog#report .bar .id { flex:1; }
+  dialog#report iframe { display:block; width:100%; height:78vh; border:0; border-radius:0 0 10px 10px;
+          background:var(--surface); }
   footer { margin-top:26px; color:var(--faint); font-size:12px; font-family:var(--mono); }
 </style>
 </head>
@@ -104,6 +118,35 @@ $rows
   <footer>Reports are deterministic PDFs — identical records hash identically.
   Dock app pushes land on POST /api/records.</footer>
 </div>
+
+<dialog id="report">
+  <div class="bar">
+    <span class="id" id="report-title">&mdash;</span>
+    <a class="pdf" id="report-download" href="#">PDF report &#8595;</a>
+    <button class="pdf" id="report-close" type="button">Close</button>
+  </div>
+  <iframe id="report-frame" title="Receipt report"></iframe>
+</dialog>
+<script>
+  (function () {
+    var dlg = document.getElementById('report');
+    var frame = document.getElementById('report-frame');
+    var title = document.getElementById('report-title');
+    var download = document.getElementById('report-download');
+    document.querySelectorAll('button.pdf.view').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var id = b.getAttribute('data-id');
+        var url = '/report/' + encodeURIComponent(id) + '.pdf';
+        title.textContent = id + ' — receipt report';
+        download.href = url;
+        frame.src = url;
+        dlg.showModal();
+      });
+    });
+    document.getElementById('report-close').addEventListener('click', function () { dlg.close(); });
+    dlg.addEventListener('close', function () { frame.src = 'about:blank'; });
+  })();
+</script>
 </body>
 </html>
 """
@@ -143,7 +186,10 @@ $rows
         $paymentBadge
       </td>
       <td style="text-align:right">
-        <a class="pdf" href="${pdfHref(r.id)}">PDF report &#8595;</a>
+        <span class="acts">
+          <button class="pdf view" data-id="${esc(r.id)}" title="Open the report on this page">View report</button>
+          <a class="pdf" href="${pdfHref(r.id)}">PDF report &#8595;</a>
+        </span>
       </td>
     </tr>"""
     }
