@@ -80,4 +80,30 @@ class ReceiptPageTest {
         assertTrue(html.contains("When you hold it, check"), "the checklist block is missing")
         assertTrue(html.contains("vehicle number filled"), "the e-way Part B check is missing")
     }
+
+    @Test
+    fun `the plan recommends the paperwork as numbered tasks`() {
+        val html = Pages.receiptPage(flagged(), ConsignmentFacts.fromRecord(flagged()), now)
+        assertTrue(html.contains("Paperwork plan — recommended for this order"))
+        assertTrue(Regex("\\d+</b> of \\d+ done").containsMatchIn(html), "progress chip is missing")
+        assertTrue(html.contains("Mark done"), "the tick action is missing")
+        assertTrue(html.contains("Written notice of loss or damage"), "the claim document is not in the plan")
+        assertTrue(html.contains("because: goods short or damaged at receipt"), "the why-line is missing")
+    }
+
+    @Test
+    fun `ticking a task marks it done and the undo link carries the state`() {
+        val html = Pages.receiptPage(flagged(), ConsignmentFacts.fromRecord(flagged()), now, mapOf("done" to "carrier-notice"))
+        assertTrue(html.contains(">DONE</span>"), "the ticked task must show DONE")
+        assertTrue(html.contains(">Undo</a>"), "the undo action must replace the tick")
+        assertTrue(html.contains("done=carrier-notice") || html.contains("done=carrier-notice&"), "the toggle link lost the state")
+        assertTrue(html.contains("<b>1</b> of"), "progress did not advance")
+    }
+
+    @Test
+    fun `rules waiting on a fact appear as unschedulable, not as tasks`() {
+        val html = Pages.receiptPage(flagged(), ConsignmentFacts.fromRecord(flagged()), now)
+        assertTrue(html.contains("CAN'T SCHEDULE"), "the e-way rule waits on the value answer")
+        assertTrue(html.contains("needs an answer first"), "the missing fact must be named")
+    }
 }

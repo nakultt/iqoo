@@ -64,8 +64,9 @@ object DashboardMain {
                 } else {
                     // The form answers on top of what the receipt implied; every
                     // unanswered fact stays unknown for the resolver.
-                    val facts = ConsignmentFacts.fromRecord(record, queryParams(exchange))
-                    respond(exchange, 200, Pages.receiptPage(record, facts, Instant.now()).toByteArray(), "text/html; charset=utf-8")
+                    val query = queryParams(exchange)
+                    val facts = ConsignmentFacts.fromRecord(record, query)
+                    respond(exchange, 200, Pages.receiptPage(record, facts, Instant.now(), query).toByteArray(), "text/html; charset=utf-8")
                 }
             }
 

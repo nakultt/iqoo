@@ -6,6 +6,7 @@ import com.veritransit.dashboard.documents.ConsignmentPaperwork
 import com.veritransit.dashboard.documents.DocumentRegistry
 import com.veritransit.dashboard.documents.GoodsCategory
 import com.veritransit.dashboard.documents.MovementReason
+import com.veritransit.dashboard.documents.Obligation
 import com.veritransit.dashboard.documents.Paperwork
 import com.veritransit.dashboard.documents.Requirement
 import com.veritransit.dashboard.documents.TransportMode
@@ -218,12 +219,18 @@ $rows
      * states no legal position, and there is no insurance-policy integration
      * to attach a claim to — the registry is what this app knows.
      */
-    fun receiptPage(record: ReceivingRecord, facts: ConsignmentFacts, now: Instant): String {
+    fun receiptPage(
+        record: ReceivingRecord,
+        facts: ConsignmentFacts,
+        now: Instant,
+        query: Map<String, String> = emptyMap(),
+    ): String {
         val paperwork = if (facts.resolvable) ConsignmentPaperwork.resolve(facts.toConsignment()) else null
         val claimCard = receiptPageClaim(record, facts, paperwork)
-        val factForm = receiptPageForm(record, facts)
+        val factForm = receiptPageForm(record, facts, query)
         val resolution = receiptPageResolution(paperwork)
         val digest = receiptPageDigest(record)
+        val plan = paperworkPlan(record, facts, query)
         val state = ShipState.of(record.outcome)
         val (stateClass, paymentBadge) = when (state) {
             ShipState.SHIPPED -> "shipped" to "OK TO PAY"
@@ -320,6 +327,16 @@ $rows
   .check { margin-top:8px; background:var(--inset); border-radius:6px; padding:8px 10px;
            font-size:12.5px; color:var(--slate); }
   .check .c { color:var(--muted); font-family:var(--mono); font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; }
+  .task .step { display:inline-flex; width:22px; height:22px; border-radius:50%; background:var(--primary);
+                color:#fff; font-family:var(--mono); font-weight:700; font-size:11.5px;
+                align-items:center; justify-content:center; margin-right:6px; }
+  .task.done { opacity:.72; }
+  .task.done .t span:first-child { text-decoration:line-through; }
+  .task.done .step { background:var(--emerald); }
+  .task.wait { background:var(--inset); }
+  .tick { font-family:var(--mono); font-size:11px; color:var(--primary); text-decoration:none;
+          border:1px solid var(--hairline); border-radius:4px; padding:4px 8px; background:var(--inset); }
+  .tick:hover { background:var(--amber-bg); }
   a.pdf { font-family:var(--mono); font-size:12px; color:var(--primary); text-decoration:none;
           border:1px solid var(--hairline); border-radius:5px; padding:6px 10px; background:var(--inset); }
   a.pdf:hover { background:var(--amber-bg); }
@@ -336,6 +353,7 @@ $rows
   <p style="margin:4px 0 0;color:var(--muted)">${esc(record.supplier)} — ${esc(record.goods)} ·
      ${esc(record.purchaseOrderId)} · ${esc(record.packingListId)} · ${esc(record.dock)}${if (record.carrier.isNotBlank()) " · " + esc(record.carrier) else ""}</p>
 $digest
+$plan
 $claimCard
 $factForm
 $resolution
@@ -346,6 +364,69 @@ $resolution
 </body>
 </html>
 """
+    }
+
+    /**
+     * The recommended paperwork runbook for this order: every rule that bites,
+     * ordered as numbered tasks with owner, clock and a mock tick — plus the
+     * rules that cannot be scheduled until a fact is answered. The tick lives
+     * in the page's own link (nothing is filed anywhere); it is a demo
+     * stand-in for the day documents are actually issued and tracked.
+     */
+    private fun paperworkPlan(record: ReceivingRecord, facts: ConsignmentFacts, query: Map<String, String>): String {
+        val done = (query["done"] ?: "").split(',').filter { it.isNotBlank() }.toSet()
+        // Trigger evaluation never reads the goods category, so the plan can be
+        // produced even while the family question is still open.
+        val resolved = ConsignmentPaperwork.resolve(facts.toConsignment())
+        val tasks = resolved.required + resolved.customary
+        val base = query.filterKeys { it != "done" }
+        fun toggleHref(id: String): String {
+            val newDone = (if (id in done) done - id else done + id).toSortedSet().joinToString(",")
+            val params = base + mapOf("done" to newDone)
+            val qs = params.entries.joinToString("&") { (k, v) ->
+                "${URLEncoder.encode(k, StandardCharsets.UTF_8)}=${URLEncoder.encode(v, StandardCharsets.UTF_8)}"
+            }
+            return receiptUrl(record.id) + "?" + qs
+        }
+        val rows = tasks.mapIndexed { index, req ->
+            val isDone = req.id in done
+            val stateChip = when {
+                isDone -> "<span class=\"state req\">DONE</span>"
+                req.obligation == Obligation.CUSTOMARY -> "<span class=\"state custom\">CUSTOMARY</span>"
+                else -> "<span class=\"state undet\">TO DO</span>"
+            }
+            val clock = req.deadline?.let { "<div class=\"m\">&#9201; ${esc(it.label)}</div>" } ?: ""
+            val taskClass = if (isDone) "task done" else "task"
+            """
+      <div class="doc $taskClass">
+        <div class="t">
+          <span><span class="step">${index + 1}</span> ${esc(req.document.title)}
+            <span class="m">· ${esc(req.holder.label)} ${esc(req.duty.verb)}</span></span>
+          <span>$stateChip <a class="tick" href="${esc(toggleHref(req.id))}">${if (isDone) "Undo" else "Mark done"}</a></span>
+        </div>
+        <div class="m">because: ${esc(req.trigger.label)}</div>
+        $clock
+      </div>"""
+        }.joinToString("\n")
+        val unschedulable = resolved.undetermined.joinToString("\n") { req ->
+            "<div class=\"doc task wait\"><div class=\"t\"><span>${esc(req.document.title)}</span>" +
+                "<span><span class=\"state no\">CAN'T SCHEDULE</span></span></div>" +
+                "<div class=\"m\">needs an answer first: ${esc(req.trigger.label)}</div></div>"
+        }
+        val progress = "<span class=\"chip\"><b>${tasks.count { it.id in done }}</b> of ${tasks.size} done</span>"
+        return """
+  <section>
+    <h2>Paperwork plan — recommended for this order</h2>
+    <div class="chips">$progress
+      <span class="chip"><b>${resolved.required.size}</b> legal</span>
+      <span class="chip"><b>${resolved.customary.size}</b> customary</span>
+      <span class="chip undet"><b>${resolved.undetermined.size}</b> unschedulable yet</span>
+    </div>
+$rows
+$unschedulable
+    <div class="fnote">Mock runbook — ticking stores nothing anywhere; the state lives in this page's link.
+    Order follows the registry: what travels with the goods, what is generated, what follows the receipt, then practice.</div>
+  </section>"""
     }
 
     /** The receipt's own picture and count: the goods figure beside the line table. */
@@ -500,7 +581,7 @@ $rows
         )
     }
 
-    private fun receiptPageForm(record: ReceivingRecord, facts: ConsignmentFacts): String {
+    private fun receiptPageForm(record: ReceivingRecord, facts: ConsignmentFacts, query: Map<String, String>): String {
         fun sel(name: String, label: String, options: List<Triple<String, String, Boolean>>) = buildString {
             append("<label class=\"f\" for=\"$name\">$label</label><select id=\"$name\" name=\"$name\">")
             options.forEach { (v, text, picked) ->
@@ -518,6 +599,7 @@ $rows
     <h2>Consignment facts</h2>
     <form class="factform" method="get" action="${esc(receiptUrl(record.id))}">
       <input type="hidden" name="submitted" value="1">
+      <input type="hidden" name="done" value="${esc((query["done"] ?: "").split(',').filter { it.isNotBlank() }.joinToString(","))}">
       <div class="fgrid">
         ${sel("category", "Goods family", listOf(
             Triple("", "— unknown —", facts.category == null),
