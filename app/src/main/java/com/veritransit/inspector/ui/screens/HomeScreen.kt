@@ -21,6 +21,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Inventory2
+import androidx.compose.material.icons.rounded.MoveToInbox
+import androidx.compose.material.icons.rounded.Outbox
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.QrCodeScanner
 import androidx.compose.material.icons.rounded.Search
@@ -37,10 +40,13 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.veritransit.inspector.data.MasterBox
 import com.veritransit.inspector.data.ReceivingRecord
 import com.veritransit.inspector.data.Repo
 import com.veritransit.inspector.data.relativeLabel
+import com.veritransit.inspector.ui.AppMode
 import com.veritransit.inspector.ui.components.OutcomeChip
+import com.veritransit.inspector.ui.components.StatusChip
 import com.veritransit.inspector.ui.components.PulseDot
 import com.veritransit.inspector.ui.components.PrimaryButton
 import com.veritransit.inspector.ui.components.SecondaryButton
@@ -54,9 +60,13 @@ import com.veritransit.inspector.ui.theme.mono
 @Composable
 fun HomeScreen(
     now: Long,
+    mode: AppMode,
+    onModeChange: (AppMode) -> Unit,
     onStartReceiving: () -> Unit,
     onLookup: () -> Unit,
+    onPackMasterBox: () -> Unit,
     onOpenRecord: (String) -> Unit,
+    onOpenMasterBox: (MasterBox) -> Unit,
     onOpenReceipts: () -> Unit,
 ) {
     Column(
@@ -67,8 +77,13 @@ fun HomeScreen(
             .statusBarsPadding()
             .padding(bottom = 28.dp),
     ) {
-        Header()
+        Header(mode)
+        ModeSwitch(mode, onModeChange, Modifier.padding(horizontal = 16.dp))
         Spacer(Modifier.height(18.dp))
+        if (mode == AppMode.SENDING) {
+            SenderHome(onPackMasterBox, onOpenMasterBox)
+            return@Column
+        }
         StatusCard(Modifier.padding(horizontal = 16.dp))
         Spacer(Modifier.height(18.dp))
         Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -98,7 +113,7 @@ fun HomeScreen(
     }
 }
 @Composable
-private fun Header() {
+private fun Header(mode: AppMode) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -119,7 +134,7 @@ private fun Header() {
         Column(Modifier.weight(1f)) {
             Text("VeriTransit", style = MaterialTheme.typography.titleLarge, color = VT.Ink)
             Text(
-                "RECEIVING",
+                mode.label.uppercase(),
                 style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Medium, fontSize = 10.5.sp, letterSpacing = 0.12.sp),
                 color = VT.Muted,
             )
@@ -209,6 +224,89 @@ private fun RecentCard(record: ReceivingRecord, now: Long, index: Int, anim: Mod
                 Text("${record.supplier} · ${record.goods}", style = MaterialTheme.typography.bodySmall, color = VT.Slate, modifier = Modifier.weight(1f))
                 Spacer(Modifier.width(8.dp))
                 Text(relativeLabel(now, record.timestamp), style = MaterialTheme.typography.bodySmall, color = VT.Muted)
+            }
+        }
+    }
+}
+
+/** Receiving or sending — the switch between the two sides of a delivery. */
+@Composable
+private fun ModeSwitch(mode: AppMode, onChange: (AppMode) -> Unit, modifier: Modifier = Modifier) {
+    Row(
+        modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(6.dp))
+            .background(VT.Inset)
+            .padding(3.dp),
+    ) {
+        listOf(AppMode.RECEIVING to Icons.Rounded.MoveToInbox, AppMode.SENDING to Icons.Rounded.Outbox).forEach { (m, icon) ->
+            val active = m == mode
+            Row(
+                Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(if (active) VT.Primary else Color.Transparent)
+                    .clickable { onChange(m) }
+                    .padding(vertical = 11.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(icon, null, tint = if (active) Color.White else VT.Slate, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(m.label, style = MaterialTheme.typography.titleSmall, color = if (active) Color.White else VT.Slate)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SenderHome(onPackMasterBox: () -> Unit, onOpenMasterBox: (MasterBox) -> Unit) {
+    val boxes = Repo.masterBoxes
+    VTCard(Modifier.padding(horizontal = 16.dp)) {
+        Row(Modifier.fillMaxWidth().padding(16.dp)) {
+            Stat("MASTER", animatedCount(boxes.size), VT.Ink, "Boxes packed", Modifier.weight(1f))
+            Stat("INSIDE", animatedCount(boxes.sumOf { it.boxes.size }), VT.Primary, "Boxes labelled", Modifier.weight(1f))
+            Stat("UNITS", animatedCount(boxes.sumOf { it.units }), VT.Emerald, "In boxes", Modifier.weight(1f))
+        }
+    }
+    Spacer(Modifier.height(18.dp))
+    Column(Modifier.padding(horizontal = 16.dp)) {
+        PrimaryButton("Pack Master Box", onPackMasterBox, icon = Icons.Rounded.Inventory2)
+    }
+    Spacer(Modifier.height(24.dp))
+    SectionLabel("Packed Master Boxes", Modifier.padding(horizontal = 16.dp))
+    Spacer(Modifier.height(10.dp))
+    Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (boxes.isEmpty()) {
+            VTCard(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("Nothing packed yet", style = MaterialTheme.typography.titleSmall, color = VT.Ink)
+                    Text(
+                        "Pack a master box to get a QR label for it and every box inside it.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = VT.Muted,
+                    )
+                }
+            }
+        }
+        boxes.forEachIndexed { i, box ->
+            VTCard(Modifier.stagger(i).fillMaxWidth().clickable { onOpenMasterBox(box) }) {
+                Column(Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(box.id, style = mono().data, color = VT.Ink)
+                        Spacer(Modifier.weight(1f))
+                        StatusChip("${box.boxes.size + 1} QR labels", bg = VT.AzureBg, fg = VT.Azure, line = Color(0xFFBAE6FD))
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text("${box.purchaseOrderId} · ${box.packingListId}", style = mono().dataSmall, color = VT.Ink)
+                    Spacer(Modifier.height(5.dp))
+                    Text(
+                        "${box.boxes.size} boxes · ${box.units} units · ${box.supplier} · " +
+                            java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(box.packedAt)),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = VT.Slate,
+                    )
+                }
             }
         }
     }

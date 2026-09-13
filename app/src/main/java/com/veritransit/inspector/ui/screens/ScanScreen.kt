@@ -2,6 +2,7 @@ package com.veritransit.inspector.ui.screens
 
 import android.Manifest as AndroidPermission
 import android.content.pm.PackageManager
+import android.speech.tts.TextToSpeech
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -68,6 +69,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -97,6 +99,7 @@ import com.veritransit.inspector.ui.components.FlowHeader
 import com.veritransit.inspector.ui.components.FlowScaffold
 import com.veritransit.inspector.ui.components.NoticeStrip
 import com.veritransit.inspector.ui.components.PrimaryButton
+import com.veritransit.inspector.ui.components.PulseDot
 import com.veritransit.inspector.ui.components.SecondaryButton
 import com.veritransit.inspector.ui.components.StepBadge
 import com.veritransit.inspector.ui.components.VTCard
@@ -118,12 +121,30 @@ fun ScanScreen(
 
     FlowScaffold(
         bottomBar = {
-            AnimatedVisibility(
-                visible = flow.detected && mode == 0,
-                enter = slideInVertically(spring(dampingRatio = 0.85f, stiffness = Spring.StiffnessLow)) { it } + fadeIn(),
-                exit = fadeOut(),
-            ) {
-                PrimaryButton("Continue to Packing List", onContinue, trailingIcon = Icons.AutoMirrored.Rounded.ArrowForward)
+            // A box code asks for a quick photo check first, so the Continue
+            // button waits until the receiver has confirmed the match.
+            val ready = flow.detected && (flow.scannedBox == null || flow.boxVerified)
+            Column {
+                AnimatedVisibility(
+                    visible = flow.detected && mode == 0 && !ready,
+                    enter = fadeIn(),
+                    exit = fadeOut(),
+                ) {
+                    Text(
+                        "One more step — take a photo below and confirm it matches the label",
+                        style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Medium, fontSize = 11.sp),
+                        color = VT.Amber,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                    )
+                }
+                AnimatedVisibility(
+                    visible = ready && mode == 0,
+                    enter = slideInVertically(spring(dampingRatio = 0.85f, stiffness = Spring.StiffnessLow)) { it } + fadeIn(),
+                    exit = fadeOut(),
+                ) {
+                    PrimaryButton("Continue to Packing List", onContinue, trailingIcon = Icons.AutoMirrored.Rounded.ArrowForward)
+                }
             }
         },
     ) {
@@ -261,10 +282,51 @@ private fun Viewfinder(flow: ReceivingFlowState, onDetected: () -> Unit, feedbac
      * Locks the step only when a decoded code names a packing list this dock
      * has. A PO the dock has no list for, or a code that is not a label at all,
      * is reported under the frame and scanning carries on.
+     *
+     * Sender-mode box codes ([BoxLabel]) resolve first: they carry the PO/PL
+     * like any carton label, plus what the box declares — product names,
+     * counts and the supplier come from the packing list they open, and the
+     * receiver then checks the goods against that declaration with a photo.
      */
     fun onLabelScanned(payloads: List<String>) {
         if (reading || flow.detected) return
         for (payload in payloads) {
+            val box = com.veritransit.inspector.data.BoxLabel.parse(payload)
+            if (box != null) {
+                val preset = Presets.forLabel(
+                    com.veritransit.inspector.data.QrLabelFields(box.purchaseOrderId, box.packingListId, payload),
+                )
+                if (preset == null) {
+                    flow.poInput = box.purchaseOrderId
+                    flow.packingListInput = box.packingListId
+                    scanHint = "${box.purchaseOrderId} has no packing list on this dock — check the label or use Manual Entry."
+                    continue
+                }
+                flow.packingList = PackingList(
+                    purchaseOrderId = preset.purchaseOrderId,
+                    packingListId = preset.packingListId,
+                    supplier = preset.supplier,
+                    goods = preset.goods,
+                    dock = preset.dock,
+                    carrier = preset.carrier,
+                    items = preset.items.map { it.copy(received = it.expected) },
+                )
+                flow.poInput = preset.purchaseOrderId
+                flow.packingListInput = preset.packingListId
+                flow.presetIndex = Presets.ALL.indexOf(preset)
+                flow.listSections = null
+                flow.listFromAi = false
+                flow.labelResolved = true
+                flow.scannedBox = box
+                flow.boxPhotoPath = null
+                flow.boxVerified = false
+                flow.boxVerdict = null
+                flow.boxCheckedBy = null
+                scanHint = null
+                if (hapticsEnabled) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                flow.detected = true
+                return
+            }
             val fields = QrLabel.parse(payload)
             val preset = Presets.forLabel(fields)
             if (preset == null) {
@@ -299,6 +361,12 @@ private fun Viewfinder(flow: ReceivingFlowState, onDetected: () -> Unit, feedbac
             flow.listSections = null
             flow.listFromAi = false
             flow.labelResolved = true
+            // A plain PO/PL code names no box, so no box card and no photo check.
+            flow.scannedBox = null
+            flow.boxPhotoPath = null
+            flow.boxVerified = false
+            flow.boxVerdict = null
+            flow.boxCheckedBy = null
             scanHint = null
             if (hapticsEnabled) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
             flow.detected = true
@@ -537,10 +605,15 @@ private fun Viewfinder(flow: ReceivingFlowState, onDetected: () -> Unit, feedbac
     }
 
     DetectedCard(flow)
+    BoxVerifyCard(flow, camera, feedback)
 }
 
 @Composable
 private fun DetectedCard(flow: ReceivingFlowState) {
+    val box = flow.scannedBox
+    val names = remember(flow.packingList) {
+        flow.packingList?.items?.associate { it.sku to it.name } ?: emptyMap()
+    }
     AnimatedVisibility(
         visible = flow.detected,
         enter = expandVertically(spring(dampingRatio = 0.85f, stiffness = 240f)) + fadeIn(),
@@ -588,14 +661,327 @@ private fun DetectedCard(flow: ReceivingFlowState) {
                         }
                     }
                 }
-                // On a label scan the supplier and lines above are the preset's,
-                // not the code's — say so where they are shown.
-                if (flow.labelResolved) {
+                // On a plain label scan the supplier and lines above are the
+                // preset's, not the code's — say so where they are shown. A
+                // box code is different: its own lines are printed below.
+                if (flow.labelResolved && box == null) {
                     Spacer(Modifier.height(10.dp))
                     Text(QrLabel.HEADERS_ONLY, style = MaterialTheme.typography.bodySmall, color = VT.Muted)
                 }
+                if (box != null) {
+                    Spacer(Modifier.height(12.dp))
+                    BoxDeclaration(box, names)
+                }
             }
         }
+    }
+}
+
+/**
+ * What the scanned box itself declares — product names, counts and the box
+ * it belongs to, in friendly words. Names come from the packing list the box
+ * opened; the counts come straight off the box's own QR.
+ */
+@Composable
+private fun BoxDeclaration(box: com.veritransit.inspector.data.BoxLabel, names: Map<String, String>) {
+    VTCard(bg = VT.Inset, border = false, radius = 6.dp) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            when (box) {
+                is com.veritransit.inspector.data.BoxLabel.Inner -> {
+                    Text(
+                        "IN THIS BOX · BOX ${box.seq} OF ${box.of}",
+                        style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.SemiBold, fontSize = 12.sp, letterSpacing = 0.06.sp),
+                        color = VT.Primary,
+                    )
+                    Text(
+                        "Nice — this little box says what's inside it. Here's the list:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = VT.Slate,
+                    )
+                    box.lines.forEach { line ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(names[line.sku] ?: line.sku, style = MaterialTheme.typography.titleSmall, color = VT.Ink)
+                                Text(line.sku, style = com.veritransit.inspector.ui.theme.mono().dataSmall, color = VT.Muted)
+                            }
+                            Text(
+                                "× ${line.qty}",
+                                style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Bold, fontSize = 15.sp),
+                                color = VT.Ink,
+                            )
+                        }
+                    }
+                    Text(
+                        "${box.lines.sumOf { it.qty }} ${if (box.lines.sumOf { it.qty } == 1) "item" else "items"} in ${box.id} · inside ${box.masterId}",
+                        style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.Medium, fontSize = 11.sp),
+                        color = VT.Muted,
+                    )
+                }
+                is com.veritransit.inspector.data.BoxLabel.Master -> {
+                    Text(
+                        "BIG BOX · ${box.id}",
+                        style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.SemiBold, fontSize = 12.sp, letterSpacing = 0.06.sp),
+                        color = VT.Primary,
+                    )
+                    Text(
+                        "This is the big outer box. It says there " +
+                            (if (box.boxCount == 1) "is 1 little box" else "are ${box.boxCount} little boxes") +
+                            " inside it, with ${box.units} ${if (box.units == 1) "item" else "items"} altogether. " +
+                            "Scan each little box on the dock count to book it in.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = VT.Slate,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The photo check: after a box code locks the step, the receiver snaps the
+ * goods and the AI — the on-device NPU model, or the cloud fallback — decides
+ * whether the photo matches what the label declared. The receiver always has
+ * the last word: a mismatch can be retaken or confirmed anyway, and when no
+ * AI backend is on the handset the receiver judges the photo themselves.
+ */
+@Composable
+private fun BoxVerifyCard(
+    flow: ReceivingFlowState,
+    camera: com.veritransit.inspector.ai.EvidenceCamera,
+    feedback: (String) -> Unit,
+) {
+    AnimatedVisibility(
+        visible = flow.detected && flow.scannedBox != null,
+        enter = expandVertically(spring(dampingRatio = 0.85f, stiffness = 240f)) + fadeIn(),
+        exit = shrinkVertically() + fadeOut(),
+    ) {
+        val context = LocalContext.current
+        val scope = rememberCoroutineScope()
+        var takingPhoto by remember { mutableStateOf(false) }
+        var checking by remember { mutableStateOf(false) }
+        var checkError by remember { mutableStateOf<String?>(null) }
+        val photoPath = flow.boxPhotoPath
+        val verdict = flow.boxVerdict
+        val aiAvailable = com.veritransit.inspector.ai.LlmGateway.isAvailable
+
+        // The speaker: shouts the verdict out loud so the receiver hears the
+        // result without staring at the screen. Needs no permission; it just
+        // uses the handset's own text-to-speech voice.
+        var speaker by remember { mutableStateOf<TextToSpeech?>(null) }
+        DisposableEffect(context) {
+            var voice: TextToSpeech? = null
+            val tts = TextToSpeech(context) { status ->
+                if (status == TextToSpeech.SUCCESS) {
+                    runCatching { voice?.language = java.util.Locale.US }
+                }
+            }
+            voice = tts
+            speaker = tts
+            onDispose {
+                runCatching { tts.shutdown() }
+                speaker = null
+            }
+        }
+        fun shout(text: String) {
+            runCatching { speaker?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "box-verdict") }
+        }
+
+        fun checkPhoto(path: String) {
+            val box = flow.scannedBox ?: return
+            if (!aiAvailable || checking) return
+            checking = true
+            checkError = null
+            scope.launch {
+                try {
+                    val names = flow.packingList?.items?.associate { it.sku to it.name } ?: emptyMap()
+                    val declaration = com.veritransit.inspector.ai.ReceivingAi.describeBox(
+                        box, names, flow.packingList?.supplier ?: "the supplier",
+                    )
+                    com.veritransit.inspector.ai.ReceivingAi.verifyBoxPhoto(path, declaration)
+                        .onSuccess { v ->
+                            flow.boxVerdict = v
+                            flow.boxCheckedBy = com.veritransit.inspector.ai.LlmGateway.lastBackend
+                            if (v.matches) {
+                                flow.boxVerified = true
+                                feedback("AI checked — the goods match the label")
+                                shout("Match! The goods match the label. You can continue.")
+                            } else {
+                                flow.boxVerified = false
+                                feedback("AI is unsure — have a look yourself")
+                                shout("No match! This does not match the label. Please check again.")
+                            }
+                        }
+                        .onFailure { e ->
+                            checkError = e.message ?: "The AI could not read that photo."
+                            flow.boxVerdict = null
+                            flow.boxCheckedBy = null
+                        }
+                } finally {
+                    checking = false
+                }
+            }
+        }
+
+        fun takePhoto() {
+            if (takingPhoto || checking || !camera.ready) return
+            takingPhoto = true
+            scope.launch {
+                try {
+                    val frame = camera.capture(context, com.veritransit.inspector.ai.EvidenceCamera.Fit.COVER)
+                    if (frame == null) {
+                        feedback(camera.error ?: "Camera could not take the shot.")
+                        return@launch
+                    }
+                    flow.boxPhotoPath = frame.absolutePath
+                    flow.boxVerified = false
+                    flow.boxVerdict = null
+                    flow.boxCheckedBy = null
+                    if (aiAvailable) {
+                        feedback("Photo taken — asking the AI…")
+                        checkPhoto(frame.absolutePath)
+                    } else {
+                        feedback("Photo taken — does it match the label above?")
+                    }
+                } finally {
+                    takingPhoto = false
+                }
+            }
+        }
+
+        fun confirmManually() {
+            flow.boxVerified = true
+            feedback("Confirmed — the box checks out")
+            shout("Confirmed. The box checks out.")
+        }
+
+        VTCard(Modifier.padding(top = 4.dp)) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(8.dp).clip(CircleShape).background(if (flow.boxVerified) VT.Emerald else VT.AmberDot))
+                    Spacer(Modifier.width(9.dp))
+                    Text(
+                        if (flow.boxVerified) "CHECKED · MATCHES" else "QUICK CHECK · DOES IT MATCH?",
+                        style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.SemiBold, fontSize = 12.sp, letterSpacing = 0.06.sp),
+                        color = VT.Slate,
+                    )
+                    Spacer(Modifier.weight(1f))
+                    if (flow.boxCheckedBy != null) {
+                        Text(
+                            if (flow.boxCheckedBy == com.veritransit.inspector.ai.LlmGateway.Backend.CLOUD) "CLOUD AI" else "ON-DEVICE AI",
+                            style = TextStyle(fontFamily = Mono, fontWeight = FontWeight.SemiBold, fontSize = 10.5.sp, letterSpacing = 0.08.sp),
+                            color = VT.Azure,
+                        )
+                    }
+                }
+                Text(
+                    if (aiAvailable) {
+                        "Point the camera at the goods and take a photo — the AI will " +
+                            "check it against the list above and speak the result out loud. " +
+                            "You always have the last word."
+                    } else {
+                        "Point the camera at the goods and take a photo, then compare it " +
+                            "with the list above — there is no AI on this handset, so you be the judge."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = VT.Slate,
+                )
+                if (photoPath != null) {
+                    BoxPhotoThumb(photoPath, Modifier.fillMaxWidth().height(180.dp))
+                }
+                if (checking) {
+                    VTCard(border = true) {
+                        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                            PulseDot(VT.Azure, 7.dp)
+                            Spacer(Modifier.width(12.dp))
+                            Text("AI is looking at the photo…", style = MaterialTheme.typography.bodyMedium, color = VT.Muted)
+                        }
+                    }
+                }
+                verdict?.let { v ->
+                    if (v.matches) {
+                        NoticeStrip(
+                            "AI checked ✓ — “${v.observation}” " +
+                                "You can continue to the packing list.",
+                        )
+                    } else {
+                        NoticeStrip(
+                            "Hmm — the AI thinks this doesn't match: “${v.observation}” " +
+                                "Retake the photo in better light, or confirm yourself if it looks right.",
+                        )
+                    }
+                }
+                checkError?.let { NoticeStrip(it) }
+                when {
+                    flow.boxVerified -> {
+                        SecondaryButton(
+                            if (takingPhoto) "Taking photo…" else "Retake photo",
+                            ::takePhoto,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                    photoPath != null && !checking -> {
+                        if (verdict == null) {
+                            // No AI, or the AI call failed: the receiver decides.
+                            PrimaryButton(
+                                text = "Yes, it matches the label",
+                                onClick = ::confirmManually,
+                            )
+                            if (aiAvailable && checkError != null) {
+                                SecondaryButton(
+                                    "Ask the AI again",
+                                    { checkPhoto(photoPath) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
+                        } else if (!verdict.matches) {
+                            PrimaryButton(
+                                text = "It actually matches — continue",
+                                onClick = ::confirmManually,
+                            )
+                        }
+                        SecondaryButton(
+                            if (takingPhoto) "Taking photo…" else "Retake photo",
+                            ::takePhoto,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                    photoPath == null -> {
+                        if (!camera.ready && camera.error != null) {
+                            NoticeStrip("Camera unavailable — ${camera.error}")
+                        }
+                        if (aiAvailable && !com.veritransit.inspector.ai.NpuEngine.isReady) {
+                            NoticeStrip(
+                                "The on-device model is not loaded — the photo will be " +
+                                    "checked by ${com.veritransit.inspector.ai.OpenRouterClient.DISPLAY_NAME} on OpenRouter.",
+                            )
+                        }
+                        PrimaryButton(
+                            text = if (takingPhoto) "Taking photo…" else "Take a photo of the goods",
+                            onClick = ::takePhoto,
+                            enabled = camera.ready && !takingPhoto && !checking,
+                            icon = Icons.Rounded.QrCodeScanner,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BoxPhotoThumb(path: String, modifier: Modifier = Modifier) {
+    val bitmap = remember(path) {
+        runCatching { android.graphics.BitmapFactory.decodeFile(path) }.getOrNull()
+    }
+    if (bitmap != null) {
+        androidx.compose.foundation.Image(
+            bitmap = bitmap.asImageBitmap(),
+            contentDescription = "Photo of the goods for comparison with the box label",
+            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+            modifier = modifier.clip(RoundedCornerShape(8.dp)),
+        )
+    } else {
+        Box(modifier.clip(RoundedCornerShape(8.dp)).background(Color(0xFF141A22)))
     }
 }
 

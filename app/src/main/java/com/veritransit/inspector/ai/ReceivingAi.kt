@@ -350,10 +350,107 @@ object ReceivingAi {
         ).map { it.trim().removeSurrounding("\"") }
     }
 
+    // --------------------------------------- box photo-vs-label check
+
+    @Serializable
+    private data class VerdictReply(
+        val matches: Boolean = false,
+        val observation: String = "",
+        val confidence: Float = 0f,
+    )
+
+    /** What the AI made of one box photo against the box's own QR declaration. */
+    data class BoxVerdict(
+        val matches: Boolean,
+        val observation: String,
+        val confidence: Float,
+    )
+
+    private const val VERIFY_SYSTEM =
+        "You are a goods-receiving assistant at a warehouse dock. You look at " +
+            "a photograph of goods and decide whether what you can see matches " +
+            "the box label's declaration, which the clerk reads out to you. " +
+            "Judge only what is visible in the photograph: the KIND of goods " +
+            "and HOW MANY of them. Packaging words in the declaration (box, " +
+            "carton, crate, loose) describe how the goods travel, not what " +
+            "they look like — loose goods photographed out of their box still " +
+            "match. A photograph of a screen showing the goods still shows " +
+            "the goods. Reply with JSON only."
+
+    /**
+     * Plain words for what [box] declares, for the verification prompt — and
+     * for screens to quote beside the verdict. [names] maps SKU to product
+     * name; [supplier] names who packed it.
+     */
+    fun describeBox(
+        box: com.veritransit.inspector.data.BoxLabel,
+        names: Map<String, String>,
+        supplier: String,
+    ): String = when (box) {
+        is com.veritransit.inspector.data.BoxLabel.Inner ->
+            "little box ${box.id} (box ${box.seq} of ${box.of} inside big box " +
+                "${box.masterId}), packed by $supplier, declares " +
+                box.lines.joinToString(", ") { line ->
+                    "${line.qty} × ${names[line.sku] ?: line.sku} (${line.sku})"
+                }
+        is com.veritransit.inspector.data.BoxLabel.Master ->
+            "big outer box ${box.id}, packed by $supplier, declares " +
+                "${box.boxCount} ${if (box.boxCount == 1) "little box" else "little boxes"} " +
+                "inside it with ${box.units} ${if (box.units == 1) "item" else "items"} altogether"
+    }
+
+    /**
+     * Checks [imagePath] against [declaration] (see [describeBox]). Returns
+     * whether the visible goods match, one sentence saying what was seen, and
+     * the model's own confidence. A malformed reply is a failure, never a
+     * pass: no verdict must read as a match.
+     */
+    suspend fun verifyBoxPhoto(imagePath: String, declaration: String): Result<BoxVerdict> =
+        LlmGateway.run(
+            systemPrompt = VERIFY_SYSTEM,
+            userPrompt = """
+                The box label declares: $declaration.
+
+                Look at the photograph and reply with one JSON object with
+                exactly these keys:
+                  matches     - true if the photograph shows the declared kind
+                                of goods in the declared number. Count every
+                                item of that kind you can see, even partly
+                                hidden ones. A different variety or colour of
+                                the same fruit still matches as long as the
+                                kind and the number are right. When in doubt,
+                                answer false.
+                  observation - one sentence describing what is in the
+                                photograph, in plain words, naming the kind
+                                and the number you counted
+                  confidence  - how sure you are, between 0 and 1
+
+                Judge only what is visible. Never answer with a key name or
+                with this description as a value. Return the JSON object and
+                nothing else.
+            """.trimIndent(),
+            imagePaths = listOf(imagePath),
+            maxTokens = 192,
+            temperature = 0.1f,
+            label = "Checking box photo",
+        ).mapCatching(::parseBoxVerdict)
+
+    /**
+     * Decodes a raw model reply into a [BoxVerdict]. Internal so the JVM test
+     * suite can exercise the exact parsing path the device run takes.
+     */
+    internal fun parseBoxVerdict(raw: String): BoxVerdict {
+        val parsed = json.decodeFromString<VerdictReply>(extractJsonObject(raw))
+        return BoxVerdict(
+            matches = parsed.matches,
+            observation = parsed.observation.trim(),
+            confidence = normaliseConfidence(parsed.confidence),
+        )
+    }
+
     // ------------------------------------------------------------- parsing
 
     private fun normalise(s: String) = s.lowercase().filter { it.isLetterOrDigit() }
-
     /**
      * Words that only appear in the schema description, never on a real packing
      * list. A quantised model sometimes answers with the instructions instead

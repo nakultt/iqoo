@@ -29,6 +29,32 @@ class ReceivingFlowState {
     var countedItems by mutableStateOf<List<PackingItem>>(emptyList())
     var scanProgress by mutableStateOf(0) // lines revealed so far
 
+    /** Box labels booked into [countedItems] — kept with the count, so a box scanned again is not booked twice. */
+    var countedBoxIds by mutableStateOf<Set<String>>(emptySet())
+
+    /**
+     * The sender-mode box label the carton scan resolved, if the code was one
+     * of ours. Null on the plain PO/PL and manual paths. Drives the friendly
+     * "what's in the box" card and the photo check on the scan step.
+     */
+    var scannedBox by mutableStateOf<com.veritransit.inspector.data.BoxLabel?>(null)
+
+    /** Photo of the goods taken to check them against [scannedBox], if any. */
+    var boxPhotoPath by mutableStateOf<String?>(null)
+
+    /** True once the receiver has looked at the photo and confirmed the match. */
+    var boxVerified by mutableStateOf(false)
+
+    /**
+     * The AI's verdict on the box photo against the scanned label, if it has
+     * answered. Null while unchecked, or when no AI backend served the check —
+     * the receiver then judges the photo themselves.
+     */
+    var boxVerdict by mutableStateOf<com.veritransit.inspector.ai.ReceivingAi.BoxVerdict?>(null)
+
+    /** Which backend gave [boxVerdict]; null when no AI check has answered. */
+    var boxCheckedBy by mutableStateOf<LlmGateway.Backend?>(null)
+
     /** Cropped evidence frame the vision model was given, if any. */
     var listEvidence by mutableStateOf<String?>(null)
     var dockEvidence by mutableStateOf<String?>(null)
@@ -104,6 +130,7 @@ class ReceivingFlowState {
 
     fun resetForCount() {
         countedItems = emptyList()
+        countedBoxIds = emptySet()
         scanProgress = 0
         note = ""
         action = ReceivingAction.RECOUNT
@@ -116,6 +143,11 @@ class ReceivingFlowState {
 
     fun startNew(startInManual: Boolean) {
         detected = false
+        scannedBox = null
+        boxPhotoPath = null
+        boxVerified = false
+        boxVerdict = null
+        boxCheckedBy = null
         packingList = if (startInManual) null else defaultPackingList()
         poInput = ""
         packingListInput = ""

@@ -124,6 +124,11 @@ dependencies {
     // as the rest of the field pipeline.
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
 
+    // QR *encoding* for sender-mode box labels — ML Kit only decodes. ZXing's
+    // core is plain Java with no Android dependency, so the JVM tests run the
+    // same encoder and read each symbol back with ZXing's own decoder.
+    implementation("com.google.zxing:core:3.5.3")
+
     // JVM-side unit tests for the pure logic (reconciliation mapping, status
     // derivation, bill-reading confidence parsing) — these run in CI without
     // a device or the model bundle.

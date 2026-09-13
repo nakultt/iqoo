@@ -24,6 +24,12 @@ object Repo {
 
     val records = mutableStateListOf<ReceivingRecord>()
 
+    /**
+     * Master boxes packed in sender mode, newest first. No seed data: nothing
+     * is listed until the sender has actually packed and labelled it.
+     */
+    val masterBoxes = mutableStateListOf<MasterBox>()
+
     fun init(now: Long) {
         if (records.isNotEmpty()) return
         fun t(minsAgo: Int) = now - minsAgo * 60_000L
@@ -276,6 +282,16 @@ object Repo {
 
     fun commit(record: ReceivingRecord) {
         records.add(0, record)
+    }
+
+    /**
+     * Saves a packed master box at the top of the list. A box saved again
+     * under the same ID — labels re-printed after an edit — replaces its
+     * earlier entry instead of listing twice.
+     */
+    fun saveMasterBox(box: MasterBox) {
+        masterBoxes.removeAll { it.id == box.id }
+        masterBoxes.add(0, box)
     }
 }
 

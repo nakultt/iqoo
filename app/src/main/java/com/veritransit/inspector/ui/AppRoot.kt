@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Home
+import androidx.compose.material.icons.rounded.Inventory2
 import androidx.compose.material.icons.rounded.QrCodeScanner
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.Icon
@@ -50,12 +51,14 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.veritransit.inspector.data.DashboardSync
 import com.veritransit.inspector.data.ItemStatus
+import com.veritransit.inspector.data.MasterBox
 import com.veritransit.inspector.data.ReceiptOutcome
 import com.veritransit.inspector.data.ReceivingAction
 import com.veritransit.inspector.data.Repo
@@ -70,6 +73,9 @@ import com.veritransit.inspector.ui.screens.ReceiptsScreen
 import com.veritransit.inspector.ui.screens.ReceiptResultScreen
 import com.veritransit.inspector.ui.screens.ScanScreen
 import com.veritransit.inspector.ui.screens.SettingsScreen
+import com.veritransit.inspector.ui.screens.BoxContentsScreen
+import com.veritransit.inspector.ui.screens.BoxLabelsScreen
+import com.veritransit.inspector.ui.screens.PackMasterBoxScreen
 import com.veritransit.inspector.ui.theme.Hanken
 import com.veritransit.inspector.ui.theme.VT
 import kotlinx.coroutines.launch
@@ -89,6 +95,9 @@ private sealed interface Page {
     data class ResultView(val recordId: String) : Page
     data object NpuModel : Page
     data object Chat : Page
+    data object BoxContents : Page
+    /** A master box's labels: [packing] while it is being packed, false when reopened from Home. */
+    data class BoxLabels(val box: MasterBox, val packing: Boolean) : Page
 }
 
 private sealed interface NavTarget {
@@ -104,6 +113,10 @@ fun AppRoot() {
     val stack = remember { mutableStateListOf<Page>() }
     val flow = remember { ReceivingFlowState() }
     val settings = remember { AppSettings() }
+    // Receiving or sending: decides what Home offers and what the second tab opens.
+    var mode by remember { mutableStateOf(AppMode.RECEIVING) }
+    val sender = remember { SenderFlowState().apply { startNew() } }
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     // Survives navigation so the transcript is still there on the way back.
     val chat = remember { com.veritransit.inspector.ai.ChatSession() }
@@ -155,6 +168,8 @@ fun AppRoot() {
                     is NavTarget.TabT -> when (target.tab) {
                         Tab.HOME -> HomeScreen(
                             now = now,
+                            mode = mode,
+                            onModeChange = { mode = it },
                             onStartReceiving = {
                                 flow.startNew(false)
                                 startInManualFlag = false
@@ -165,19 +180,35 @@ fun AppRoot() {
                                 startInManualFlag = true
                                 gotoTab(Tab.SCAN)
                             },
+                            onPackMasterBox = {
+                                sender.startNew()
+                                gotoTab(Tab.SCAN)
+                            },
                             onOpenRecord = { id -> stack.add(Page.ResultView(id)) },
+                            onOpenMasterBox = { box -> stack.add(Page.BoxLabels(box, packing = false)) },
                             onOpenReceipts = { gotoTab(Tab.RECORDS) },
                         )
-                        Tab.SCAN -> ScanScreen(
-                            flow = flow,
-                            startInManual = startInManualFlag,
-                            onDetected = {
-                                if (flow.packingList == null) flow.packingList = ReceivingFlowState.defaultPackingList()
-                            },
-                            onContinue = { stack.add(Page.PackingListStep) },
-                            onBack = { gotoTab(Tab.HOME) },
-                            feedback = { msg -> feedback(msg, beep = true) },
-                        )
+                        Tab.SCAN -> if (mode == AppMode.SENDING) {
+                            PackMasterBoxScreen(
+                                sender = sender,
+                                onContinue = {
+                                    sender.planIfNeeded()
+                                    stack.add(Page.BoxContents)
+                                },
+                                onBack = { gotoTab(Tab.HOME) },
+                            )
+                        } else {
+                            ScanScreen(
+                                flow = flow,
+                                startInManual = startInManualFlag,
+                                onDetected = {
+                                    if (flow.packingList == null) flow.packingList = ReceivingFlowState.defaultPackingList()
+                                },
+                                onContinue = { stack.add(Page.PackingListStep) },
+                                onBack = { gotoTab(Tab.HOME) },
+                                feedback = { msg -> feedback(msg, beep = true) },
+                            )
+                        }
                         Tab.RECORDS -> ReceiptsScreen(
                             now = now,
                             onOpenRecord = { id -> stack.add(Page.ResultView(id)) },
@@ -190,6 +221,35 @@ fun AppRoot() {
                         )
                     }
                     is NavTarget.PageT -> when (val page = target.page) {
+                        Page.BoxContents -> BoxContentsScreen(
+                            sender = sender,
+                            onGenerate = {
+                                runCatching { sender.build(System.currentTimeMillis()) }
+                                    .onSuccess { stack.add(Page.BoxLabels(it, packing = true)) }
+                                    .onFailure { feedback(it.message ?: "Labels could not be made") }
+                            },
+                            onBack = { stack.removeAt(stack.lastIndex) },
+                        )
+                        is Page.BoxLabels -> BoxLabelsScreen(
+                            box = page.box,
+                            onPrint = {
+                                // The ID goes on paper, so the box is saved first:
+                                // no later master box is offered the same ID.
+                                if (page.packing) sender.save(page.box)
+                                LabelPrinter.print(context, page.box)
+                            },
+                            onFinish = if (page.packing) {
+                                {
+                                    sender.save(page.box)
+                                    feedback("${page.box.id} packed · ${page.box.boxes.size + 1} QR labels", beep = true)
+                                    sender.startNew()
+                                    gotoTab(Tab.HOME)
+                                }
+                            } else {
+                                null
+                            },
+                            onBack = { stack.removeAt(stack.lastIndex) },
+                        )
                         Page.NpuModel -> NpuScreen(
                             onBack = { stack.removeAt(stack.lastIndex) },
                             onToast = { feedback(it) },
@@ -277,6 +337,7 @@ fun AppRoot() {
         if (showBar) {
             BottomBar(
                 current = tab,
+                mode = mode,
                 modifier = Modifier.align(Alignment.BottomCenter),
                 onSelect = { t ->
                     if (t != tab) {
@@ -285,7 +346,9 @@ fun AppRoot() {
                         // Home's Start Receiving: a filed receipt's flow would
                         // otherwise reopen already "LABEL LOCKED", with the
                         // scanner ignoring every frame.
-                        if (t == Tab.SCAN) flow.startNew(false)
+                        if (t == Tab.SCAN) {
+                            if (mode == AppMode.SENDING) sender.startNew() else flow.startNew(false)
+                        }
                         gotoTab(t)
                     }
                 },
@@ -311,7 +374,7 @@ fun AppRoot() {
 }
 
 @Composable
-private fun BottomBar(current: Tab, onSelect: (Tab) -> Unit, modifier: Modifier = Modifier) {
+private fun BottomBar(current: Tab, mode: AppMode, onSelect: (Tab) -> Unit, modifier: Modifier = Modifier) {
     Surface(
         modifier = modifier.fillMaxWidth(),
         color = VT.Surface,
@@ -328,6 +391,12 @@ private fun BottomBar(current: Tab, onSelect: (Tab) -> Unit, modifier: Modifier 
             ) {
                 Tab.entries.forEach { t ->
                     val active = t == current
+                    // Sending turns Receive into Pack; the other tabs serve both modes.
+                    val (label, icon) = if (t == Tab.SCAN && mode == AppMode.SENDING) {
+                        "Pack" to Icons.Rounded.Inventory2
+                    } else {
+                        t.label to t.icon
+                    }
                     val color by androidx.compose.animation.animateColorAsState(
                         if (active) VT.Primary else VT.Muted,
                         tween(220),
@@ -350,12 +419,12 @@ private fun BottomBar(current: Tab, onSelect: (Tab) -> Unit, modifier: Modifier 
                         verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
                     ) {
                         Icon(
-                            t.icon, t.label,
+                            icon, label,
                             tint = color,
                             modifier = Modifier.size(24.dp).graphicsLayer { scaleX = scale; scaleY = scale },
                         )
                         Text(
-                            t.label,
+                            label,
                             style = TextStyle(fontFamily = Hanken, fontWeight = FontWeight.SemiBold, fontSize = 11.sp),
                             color = color,
                             modifier = Modifier.alpha(if (active) 1f else 0.85f),

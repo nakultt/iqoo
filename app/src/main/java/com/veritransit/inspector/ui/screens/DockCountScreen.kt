@@ -125,8 +125,13 @@ fun DockCountScreen(
     // quantities, never a scripted scenario — and needs no model, so counting
     // works with every AI backend off.
     val tally = remember(packingList) {
-        ItemScanTally(packingList?.items ?: emptyList()).apply {
-            // Back from the result screen: pick the hand count up where it was left.
+        ItemScanTally(
+            packingList?.items ?: emptyList(),
+            purchaseOrderId = packingList?.purchaseOrderId,
+            countedBoxes = if (flow.countedByAi) emptySet() else flow.countedBoxIds,
+        ).apply {
+            // Back from the result screen: pick the hand count up where it was
+            // left, with the boxes already booked into it.
             if (!flow.countedByAi) flow.countedItems.forEach { adjust(it.sku, it.received) }
         }
     }
@@ -157,6 +162,33 @@ fun DockCountScreen(
                 is ItemScanTally.Outcome.NotOnList ->
                     lastScan = "Not on this packing list: ${outcome.code.take(40)}"
                 ItemScanTally.Outcome.StillInView -> Unit
+                is ItemScanTally.Outcome.BoxCounted -> {
+                    lines = tally.lines
+                    val box = outcome.box
+                    val booked = box.lines - outcome.notOnList.toSet()
+                    // "As labelled": a box label books what the sender declared
+                    // is inside, not a unit-by-unit count — the line says so.
+                    lastScan = buildString {
+                        append("Box ${box.seq} of ${box.of} counted as labelled — ")
+                        append(
+                            if (booked.isEmpty()) "nothing on this packing list"
+                            else booked.joinToString(" · ") { "+${it.qty} ${it.sku}" },
+                        )
+                        if (outcome.notOnList.isNotEmpty()) {
+                            append(" · not on this packing list: ")
+                            append(outcome.notOnList.joinToString { "${it.sku} ×${it.qty}" })
+                        }
+                    }
+                    if (hapticsEnabled) haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    feedback("Box ${box.seq}/${box.of} · ${booked.sumOf { it.qty }} units as labelled")
+                }
+                is ItemScanTally.Outcome.BoxAlreadyCounted ->
+                    lastScan = "Box ${outcome.box.seq} of ${outcome.box.of} (${outcome.box.id}) is already counted"
+                is ItemScanTally.Outcome.MasterLabel ->
+                    lastScan = "Master box ${outcome.master.id} — ${outcome.master.boxCount} boxes, " +
+                        "${outcome.master.units} units inside. Scan each box."
+                is ItemScanTally.Outcome.OtherDelivery ->
+                    lastScan = "That box is labelled for ${outcome.label.purchaseOrderId}, not this delivery"
             }
         }
     }
@@ -226,6 +258,7 @@ fun DockCountScreen(
     fun finishCount() {
         if (packingList == null || counting) return
         flow.countedItems = tally.lines
+        flow.countedBoxIds = tally.countedBoxIds
         flow.scanProgress = flow.countedItems.size
         flow.countedByAi = false
         flow.countedBy = null
@@ -286,7 +319,7 @@ fun DockCountScreen(
                         packingList == null -> "Go back and load a packing list first"
                         !cameraGranted -> "Allow camera access to scan item codes — or count with + and −"
                         camera.error != null -> "Camera unavailable — ${camera.error}"
-                        else -> lastScan ?: "Scan each item's barcode or QR — or count with + and −"
+                        else -> lastScan ?: "Scan each item's code or box label — or count with + and −"
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     color = VT.Slate,

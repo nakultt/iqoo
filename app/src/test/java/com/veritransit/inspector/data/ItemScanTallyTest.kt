@@ -81,4 +81,66 @@ class ItemScanTallyTest {
         assertEquals(0, received(t, "ELC-1180"))
         assertNull(t.adjust("NOT-ON-LIST", +1))
     }
+
+    private val box1 = BoxLabel.Inner(
+        "PO-2025-4471", "PL-2025-4471-A", "MB-4471-01-B01",
+        masterId = "MB-4471-01", seq = 1, of = 2,
+        lines = listOf(BoxLine("ELC-2710", 3), BoxLine("ELC-1180", 1)),
+    )
+
+    @Test
+    fun `a box label books every line it declares in one scan`() {
+        val t = ItemScanTally(packed, purchaseOrderId = "PO-2025-4471")
+        val outcome = assertIs<ItemScanTally.Outcome.BoxCounted>(t.onCode(box1.payload(), 0))
+        assertEquals(listOf("ELC-2710" to 3, "ELC-1180" to 1), outcome.lines.map { it.sku to it.received })
+        assertEquals(emptyList(), outcome.notOnList)
+        assertEquals(4, t.unitsReceived)
+        assertEquals(setOf("MB-4471-01-B01"), t.countedBoxIds)
+    }
+
+    @Test
+    fun `a box counts once, however long it stays in view or however often it comes back`() {
+        val t = ItemScanTally(packed, rearmMs = 1_000, purchaseOrderId = "PO-2025-4471")
+        assertIs<ItemScanTally.Outcome.BoxCounted>(t.onCode(box1.payload(), 0))
+        for (ms in 30L..3_000L step 30) {
+            assertEquals(ItemScanTally.Outcome.StillInView, t.onCode(box1.payload(), ms))
+        }
+        assertIs<ItemScanTally.Outcome.BoxAlreadyCounted>(t.onCode(box1.payload(), 10_000))
+        assertEquals(4, t.unitsReceived)
+    }
+
+    @Test
+    fun `a master box label counts nothing`() {
+        val master = BoxLabel.Master("PO-2025-4471", "PL-2025-4471-A", "MB-4471-01", boxCount = 2, units = 7)
+        val t = ItemScanTally(packed, purchaseOrderId = "PO-2025-4471")
+        val outcome = assertIs<ItemScanTally.Outcome.MasterLabel>(t.onCode(master.payload(), 0))
+        assertEquals(2, outcome.master.boxCount)
+        assertEquals(0, t.unitsReceived)
+    }
+
+    @Test
+    fun `a box labelled for another po counts nothing, however the delivery's po is written`() {
+        val other = box1.copy(purchaseOrderId = "PO-2025-4488", id = "MB-4488-01-B01", masterId = "MB-4488-01")
+        val t = ItemScanTally(packed, purchaseOrderId = "po 2025 4471")
+        assertIs<ItemScanTally.Outcome.OtherDelivery>(t.onCode(other.payload(), 0))
+        assertEquals(0, t.unitsReceived)
+        assertIs<ItemScanTally.Outcome.BoxCounted>(t.onCode(box1.payload(), 10))
+        assertEquals(4, t.unitsReceived)
+    }
+
+    @Test
+    fun `declared lines the packing list lacks are named, and the rest still count`() {
+        val mixed = box1.copy(lines = listOf(BoxLine("ELC-1180", 2), BoxLine("ELC-9999", 5)))
+        val t = ItemScanTally(packed)
+        val outcome = assertIs<ItemScanTally.Outcome.BoxCounted>(t.onCode(mixed.payload(), 0))
+        assertEquals(listOf(BoxLine("ELC-9999", 5)), outcome.notOnList)
+        assertEquals(2, t.unitsReceived)
+    }
+
+    @Test
+    fun `boxes counted before a return to the count stay counted`() {
+        val t = ItemScanTally(packed, countedBoxes = setOf(box1.id))
+        assertIs<ItemScanTally.Outcome.BoxAlreadyCounted>(t.onCode(box1.payload(), 0))
+        assertEquals(0, t.unitsReceived)
+    }
 }
