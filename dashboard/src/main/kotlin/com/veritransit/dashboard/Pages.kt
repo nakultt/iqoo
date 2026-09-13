@@ -231,6 +231,8 @@ $rows
         val resolution = receiptPageResolution(paperwork)
         val digest = receiptPageDigest(record)
         val plan = paperworkPlan(record, facts, query)
+        val agentRan = query["agent"] == "run"
+        val agentCard = if (agentRan) agentRunSection(record, facts, query) else ""
         val state = ShipState.of(record.outcome)
         val (stateClass, paymentBadge) = when (state) {
             ShipState.SHIPPED -> "shipped" to "OK TO PAY"
@@ -334,6 +336,16 @@ $rows
   .task.done .t span:first-child { text-decoration:line-through; }
   .task.done .step { background:var(--emerald); }
   .task.wait { background:var(--inset); }
+  .state.draft { color:#0369A1; background:#F0F9FF; border-color:#BAE6FD; }
+  .state.human { color:var(--amber); background:var(--amber-bg); border-color:var(--amber-line); }
+  .agentcard { background:var(--surface); border:1px solid var(--hairline); border-radius:10px; padding:16px; }
+  .agentcard h2 { color:var(--primary); }
+  .doc.log { border-left:3px solid var(--primary); }
+  pre.draft { margin:8px 0 0; padding:10px 12px; background:var(--inset); border:1px solid var(--hairline);
+              border-radius:6px; font-family:var(--mono); font-size:11px; line-height:1.55; color:var(--slate);
+              white-space:pre-wrap; overflow-x:auto; }
+  .tick.agentgo { background:var(--primary); color:#fff; border-color:var(--primary); font-weight:700; }
+  .tick.agentgo:hover { background:#5C001D; }
   .tick { font-family:var(--mono); font-size:11px; color:var(--primary); text-decoration:none;
           border:1px solid var(--hairline); border-radius:4px; padding:4px 8px; background:var(--inset); }
   .tick:hover { background:var(--amber-bg); }
@@ -353,6 +365,7 @@ $rows
   <p style="margin:4px 0 0;color:var(--muted)">${esc(record.supplier)} — ${esc(record.goods)} ·
      ${esc(record.purchaseOrderId)} · ${esc(record.packingListId)} · ${esc(record.dock)}${if (record.carrier.isNotBlank()) " · " + esc(record.carrier) else ""}</p>
 $digest
+$agentCard
 $plan
 $claimCard
 $factForm
@@ -379,19 +392,31 @@ $resolution
         // produced even while the family question is still open.
         val resolved = ConsignmentPaperwork.resolve(facts.toConsignment())
         val tasks = resolved.required + resolved.customary
+        val agentRan = query["agent"] == "run"
+        val agent = if (agentRan) agentActions(record, facts, resolved) else emptyMap()
         val base = query.filterKeys { it != "done" }
-        fun toggleHref(id: String): String {
-            val newDone = (if (id in done) done - id else done + id).toSortedSet().joinToString(",")
-            val params = base + mapOf("done" to newDone)
+        fun href(extra: Map<String, String>): String {
+            val params = base + extra
             val qs = params.entries.joinToString("&") { (k, v) ->
                 "${URLEncoder.encode(k, StandardCharsets.UTF_8)}=${URLEncoder.encode(v, StandardCharsets.UTF_8)}"
             }
             return receiptUrl(record.id) + "?" + qs
         }
+        fun toggleHref(id: String): String {
+            val newDone = (if (id in done) done - id else done + id).toSortedSet().joinToString(",")
+            return href(mapOf("done" to newDone))
+        }
+        val agentCtl = if (agentRan) {
+            "<a class=\"tick\" href=\"${esc(href(emptyMap()))}\">Reset run</a>"
+        } else {
+            "<a class=\"tick agentgo\" href=\"${esc(href(mapOf("agent" to "run")))}\">&#9654; Let the agent do it</a>"
+        }
         val rows = tasks.mapIndexed { index, req ->
             val isDone = req.id in done
+            val agentOutcome = agent[req.id]
             val stateChip = when {
                 isDone -> "<span class=\"state req\">DONE</span>"
+                agentOutcome != null -> "<span class=\"state ${agentOutcome.chipClass}\">${agentOutcome.status}</span>"
                 req.obligation == Obligation.CUSTOMARY -> "<span class=\"state custom\">CUSTOMARY</span>"
                 else -> "<span class=\"state undet\">TO DO</span>"
             }
@@ -421,6 +446,7 @@ $resolution
       <span class="chip"><b>${resolved.required.size}</b> legal</span>
       <span class="chip"><b>${resolved.customary.size}</b> customary</span>
       <span class="chip undet"><b>${resolved.undetermined.size}</b> unschedulable yet</span>
+      $agentCtl
     </div>
 $rows
 $unschedulable
@@ -460,6 +486,174 @@ $unschedulable
         </table>
         <div class="m" style="margin-top:6px">${record.discrepancyCount} ${if (record.discrepancyCount == 1) "discrepancy" else "discrepancies"} across ${record.items.size} lines$conf</div>
       </div>
+    </div>
+  </section>"""
+    }
+
+    /** One thing the agent did: its status, the human-readable log line, and any draft it left. */
+    private data class AgentOutcome(val status: String, val chipClass: String, val message: String, val artifact: String? = null)
+
+    /**
+     * The mock agent run. For every requirement the plan holds, the agent
+     * "does" what a real integration could do with the data this page already
+     * has: reconcile the invoice against the GRN, fill e-way Part A, draft the
+     * carrier's loss notice, request the supplier's credit note — and stops
+     * where a human or a real portal is required. Deterministic: same facts,
+     * same run, same drafts.
+     */
+    private fun agentActions(
+        record: ReceivingRecord,
+        facts: ConsignmentFacts,
+        paperwork: Paperwork,
+    ): Map<String, AgentOutcome> {
+        val out = LinkedHashMap<String, AgentOutcome>()
+        val shortLines = record.items.filter { it.received < it.expected }
+        val damagedLines = record.items.filter { it.damaged > 0 }
+        val shortUnits = shortLines.sumOf { it.expected - it.received }
+        val all = paperwork.required + paperwork.customary + paperwork.undetermined
+        for (req in all) {
+            val outcome = when (req.document) {
+                ConsignmentDocument.TAX_INVOICE ->
+                    if (facts.supplierEInvoicing == true) {
+                        AgentOutcome("YOU", "human", "E-invoicing is notified for this supplier — the IRN must come from the " +
+                            "GST portal. Verified the invoice copy against the GRN instead: ${record.items.size} lines, 0 quantity mismatches.")
+                    } else {
+                        AgentOutcome("DONE", "req", "Verified the invoice copy against PO ${record.purchaseOrderId.ifBlank { "—" }} " +
+                            "and this GRN: ${record.items.size} lines, 0 quantity mismatches, r.48(1) copy markings checked.")
+                    }
+                ConsignmentDocument.EWAY_BILL ->
+                    if (facts.value == null) {
+                        AgentOutcome("BLOCKED", "bad", "Cannot fill Part A without the r.138(1) value — ask the supplier's invoice " +
+                            "or answer it in the facts form.")
+                    } else {
+                        AgentOutcome("DRAFTED", "draft", "Filled Part A from the invoice and your facts; Part B (vehicle) is the " +
+                            "transporter's — handed off with the draft.", ewayDraft(record, facts))
+                    }
+                ConsignmentDocument.CARRIER_NOTICE ->
+                    if (record.flagged || facts.discrepancyAtReceipt) {
+                        AgentOutcome("DRAFTED", "draft", "Drafted the written notice of loss/shortage to ${record.carrier} — " +
+                            "ready for an authorised signature before it is served.", carrierNoticeDraft(record))
+                    } else {
+                        AgentOutcome("SKIPPED", "no", "No discrepancy at receipt — nothing to notify the carrier about.")
+                    }
+                ConsignmentDocument.LORRY_RECEIPT ->
+                    if (facts.byCommonCarrier) {
+                        AgentOutcome("DONE", "req", "Collected the consignment note from the transporter and filed it as the " +
+                            "claim anchor. Booking date recorded — the 180-day clock runs from it.")
+                    } else {
+                        AgentOutcome("SKIPPED", "no", "Not a common-carrier handover — no consignment note on file.")
+                    }
+                ConsignmentDocument.CREDIT_NOTE ->
+                    if (shortLines.isNotEmpty() || damagedLines.isNotEmpty()) {
+                        AgentOutcome("DRAFTED", "draft", "Requested a credit note from ${record.supplier} for " +
+                            "$shortUnits short unit(s)${if (damagedLines.isNotEmpty()) " and ${damagedLines.sumOf { it.damaged }} damaged" else ""} — " +
+                            "declaration deadline is the s.34(2) cutoff.", creditNoteDraft(record, shortUnits))
+                    } else {
+                        AgentOutcome("SKIPPED", "no", "Full count — no credit note to request.")
+                    }
+                ConsignmentDocument.DELIVERY_CHALLAN ->
+                    if (facts.reason == MovementReason.SUPPLY && !facts.inLots) {
+                        AgentOutcome("SKIPPED", "no", "Movement is a supply — an invoice covers it, no challan needed.")
+                    } else {
+                        AgentOutcome("DRAFTED", "draft", "Prepared the r.55 delivery challan shell (triplicate markings, " +
+                            "r.55(1) particulars) for the transporter's copy.")
+                    }
+                ConsignmentDocument.GOODS_RECEIVED_NOTE ->
+                    AgentOutcome("DONE", "req", "GRN ${record.id} is on file, signed subject to inspection until the count closed.")
+                ConsignmentDocument.PURCHASE_ORDER ->
+                    AgentOutcome("DONE", "req", "Anchored the three-way match on PO ${record.purchaseOrderId.ifBlank { "—" }}.")
+                ConsignmentDocument.PACKING_LIST ->
+                    AgentOutcome("DONE", "req", "Packing list ${record.packingListId.ifBlank { "—" }} archived with the receipt.")
+                ConsignmentDocument.RECORDS ->
+                    AgentOutcome("DONE", "req", "Retention noted: 72 months from the annual return's due date (s.36).")
+                ConsignmentDocument.BILL_OF_ENTRY ->
+                    if (facts.imported) {
+                        AgentOutcome("DONE", "req", "Bill-of-entry number and date copied into e-way Part A.")
+                    } else {
+                        AgentOutcome("SKIPPED", "no", "Not an import.")
+                    }
+                ConsignmentDocument.ITC_04 ->
+                    if (facts.reason == MovementReason.JOB_WORK) {
+                        AgentOutcome("DRAFTED", "draft", "Queued the job-work challans for ITC-04 — check the half-year split " +
+                            "(turnover above ₹5 crore) before furnishing.")
+                    } else {
+                        AgentOutcome("SKIPPED", "no", "Not a job-work movement.")
+                    }
+            }
+            out[req.id] = outcome
+        }
+        return out
+    }
+
+    /** Drafted carrier notice — the claim document for short/damaged goods. */
+    private fun carrierNoticeDraft(r: ReceivingRecord): String {
+        val lines = r.items.filter { it.received < it.expected || it.damaged > 0 }
+            .joinToString("\n") {
+                "  ${it.sku} · ${it.name} — packed ${it.expected}, received ${it.received}" +
+                    (if (it.damaged > 0) ", damaged ${it.damaged}" else "")
+            }
+        return """
+To:    ${r.carrier} (carrier of record)
+From:  ${r.warehouse} — Goods-In
+Re:    Written notice of loss / shortage — lorry receipt no. ______, booked on ______
+
+We received, under the above consignment note:
+
+$lines
+
+The goods were received subject to inspection; the discrepancy is recorded in
+goods-received note ${r.id} (PO ${r.purchaseOrderId} / PL ${r.packingListId}, ${r.supplier}).
+
+This letter constitutes written notice of the shortage within the meaning of
+the Carriage by Road Act, 2007, served within 180 days of booking. We reserve
+all rights to claim the value of the missing goods and associated charges.
+
+Please acknowledge receipt of this notice.
+Goods-In Office — signature required before service."""
+            .trim()
+    }
+
+    /** Drafted credit-note request — the supplier side of a shortage. */
+    private fun creditNoteDraft(r: ReceivingRecord, shortUnits: Int): String =
+        "To ${r.supplier}: request credit note against invoice no. ______ for $shortUnits unit(s) " +
+            "short under PO ${r.purchaseOrderId} / GRN ${r.id}. Kindly reference the original invoice " +
+            "and declare it by the s.34(2) cutoff. — ${r.warehouse}"
+
+    /** Drafted e-way bill Part A — everything the app actually knows. */
+    private fun ewayDraft(r: ReceivingRecord, facts: ConsignmentFacts): String =
+        "PART A (draft) — supplier: ${r.supplier} · recipient: ${r.warehouse} · " +
+            "value: ${com.veritransit.dashboard.documents.formatRupees(facts.value!!.paise)} " +
+            "(r.138(1): declared + tax − exempt) · PART B (vehicle): with the transporter — " +
+            "invalid by road until filled (r.138(3) Expl. 2)"
+
+    /**
+     * The agent run log: what the agent did for this order, in plan order, with
+     * its drafts. A mock of the day an integration actually does this — it
+     * sends nothing, files nothing and verifies nothing anywhere.
+     */
+    private fun agentRunSection(record: ReceivingRecord, facts: ConsignmentFacts, query: Map<String, String>): String {
+        val resolved = ConsignmentPaperwork.resolve(facts.toConsignment())
+        val actions = agentActions(record, facts, resolved)
+        val tasks = resolved.required + resolved.customary
+        val entries = (tasks + resolved.undetermined).mapNotNull { req ->
+            val outcome = actions[req.id] ?: AgentOutcome("BLOCKED", "bad", "Needs an answer first: ${req.trigger.label}")
+            val artifact = outcome.artifact?.let { "<pre class=\"draft\">${esc(it)}</pre>" } ?: ""
+            "<div class=\"doc log\"><div class=\"t\">" +
+                "<span><span class=\"state ${outcome.chipClass}\">${outcome.status}</span> ${esc(req.document.title)}</span>" +
+                "</div><div class=\"s\">${esc(outcome.message)}</div>$artifact</div>"
+        }.joinToString("\n")
+        val tally = actions.values.groupingBy { it.status }.eachCount()
+        val tallyChips = listOf("DONE", "DRAFTED", "SKIPPED", "BLOCKED", "YOU").mapNotNull { s ->
+            tally[s]?.let { n -> "<span class=\"chip\"><b>$n</b> ${s.lowercase()}</span>" }
+        }.joinToString("\n")
+        return """
+  <section>
+    <div class="agentcard">
+      <h2>Agent run — what it did for this order</h2>
+      <div class="chips">$tallyChips</div>
+$entries
+      <div class="fnote">Mock agent run — generated on this page from the registry and the receipt. It sent,
+      filed and verified nothing anywhere; drafts need an authorised human, and portal steps stay human too.</div>
     </div>
   </section>"""
     }

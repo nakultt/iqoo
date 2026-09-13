@@ -106,4 +106,36 @@ class ReceiptPageTest {
         assertTrue(html.contains("CAN'T SCHEDULE"), "the e-way rule waits on the value answer")
         assertTrue(html.contains("needs an answer first"), "the missing fact must be named")
     }
+
+    @Test
+    fun `the agent run drafts the carrier notice and blocks on the missing value`() {
+        val html = Pages.receiptPage(flagged(), ConsignmentFacts.fromRecord(flagged()), now, mapOf("agent" to "run"))
+        assertTrue(html.contains("Agent run — what it did for this order"))
+        assertTrue(html.contains("DRAFTED"), "the carrier notice and credit note should be drafted")
+        assertTrue(html.contains("Carriage by Road Act"), "the carrier notice draft is missing")
+        assertTrue(html.contains("VRL Logistics"), "the draft must name the carrier of record")
+        assertTrue(html.contains("BLOCKED"), "e-way must block on the unanswered value")
+        assertTrue(html.contains("Mock agent run"), "the mock boundary must be stated")
+        assertTrue(html.contains(">Reset run</a>"), "a reset must be offered")
+    }
+
+    @Test
+    fun `with the value answered the agent drafts e-way Part A`() {
+        val html = Pages.receiptPage(
+            flagged(),
+            ConsignmentFacts.fromRecord(flagged(), mapOf("submitted" to "1", "inter" to "true", "declared" to "240000")),
+            now,
+            mapOf("agent" to "run", "submitted" to "1", "inter" to "true", "declared" to "240000"),
+        )
+        assertTrue(html.contains("PART A (draft)"), "the e-way Part A draft is missing")
+        assertTrue(html.contains("₹2,40,000"), "the draft must carry the formatted value")
+        assertTrue(html.contains("PART B (vehicle): with the transporter"), "Part B handoff must be stated")
+    }
+
+    @Test
+    fun `the agent offers itself before it runs`() {
+        val html = Pages.receiptPage(flagged(), ConsignmentFacts.fromRecord(flagged()), now)
+        assertTrue(html.contains("Let the agent do it"), "the run affordance is missing")
+        assertTrue(!html.contains("Agent run — what it did"), "no log before it runs")
+    }
 }
