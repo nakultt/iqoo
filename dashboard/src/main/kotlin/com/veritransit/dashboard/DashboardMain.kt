@@ -58,6 +58,12 @@ object DashboardMain {
                 if (record == null) {
                     respond(exchange, 404, "No receipt '$id' in the log\n".toByteArray(), "text/plain")
                 } else {
+                    // Render in place — the board's viewer embeds this response,
+                    // and a direct open shows the report rather than a download.
+                    exchange.responseHeaders.add(
+                        "Content-Disposition",
+                        "inline; filename=\"${id.replace("\"", "")}.pdf\"",
+                    )
                     respond(exchange, 200, PdfReport.render(record), "application/pdf")
                 }
             }
